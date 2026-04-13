@@ -1,0 +1,10 @@
+fastapi
+uvicorn[standard]
+sqlmodel
+httpx
+beautifulsoup4
+playwright
+python-dotenv
+python-multipart
+aiofiles
+pypdf

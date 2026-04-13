@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ARIA — PhD Agent</title>
+<link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+
+<div class="shell">
+
+  <!-- Sidebar -->
+  <nav class="side">
+    <div class="logo">ARIA</div>
+    <a class="nav" href="#" data-view="queue">
+      <span class="dot amber"></span>Queue
+      <span class="badge-nav hidden" id="nav-queue">0</span>
+    </a>
+    <a class="nav" href="#" data-view="positions">
+      <span class="dot"></span>All Positions
+    </a>
+    <a class="nav" href="#" data-view="errors">
+      <span class="dot red"></span>Errors
+      <span class="badge-nav hidden" id="nav-errors">0</span>
+    </a>
+    <a class="nav" href="#" data-view="submitted">
+      <span class="dot"></span>Submitted
+    </a>
+    <a class="nav" href="#" data-view="applicants">
+      <span class="dot"></span>Applicants
+    </a>
+    <a class="nav" href="#" data-view="sources">
+      <span class="dot"></span>Sources
+    </a>
+  </nav>
+
+  <!-- Main -->
+  <div class="main">
+
+    <!-- Stats bar -->
+    <div class="stats" id="stats-bar">
+      <div class="stat">
+        <div class="stat-n" id="stat-discovered">—</div>
+        <div class="stat-l">Discovered</div>
+      </div>
+      <div class="stat">
+        <div class="stat-n" id="stat-matched">—</div>
+        <div class="stat-l">Matched</div>
+      </div>
+      <div class="stat">
+        <div class="stat-n amber" id="stat-ready">—</div>
+        <div class="stat-l">Ready to Review</div>
+      </div>
+      <div class="stat">
+        <div class="stat-n green" id="stat-submitted">—</div>
+        <div class="stat-l">Submitted</div>
+      </div>
+      <div class="stat">
+        <div class="stat-n red" id="stat-errors">—</div>
+        <div class="stat-l">Errors</div>
+      </div>
+    </div>
+
+    <!-- Views -->
+    <div id="view-queue"      class="view hidden"></div>
+    <div id="view-positions"  class="view hidden"></div>
+    <div id="view-errors"     class="view hidden"></div>
+    <div id="view-submitted"  class="view hidden"></div>
+    <div id="view-applicants" class="view hidden"></div>
+    <div id="view-sources"    class="view hidden"></div>
+
+  </div>
+</div>
+
+<div id="toast" class="toast"></div>
+
+<script src="/js/app.js"></script>
+<script src="/js/queue.js"></script>
+<script src="/js/positions.js"></script>
+<script src="/js/applicants.js"></script>
+<script src="/js/sources.js"></script>
+</body>
+</html>
