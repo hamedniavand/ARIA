@@ -2,12 +2,14 @@
 
 An automated platform that discovers PhD and research positions from multiple job boards and Telegram channels, scores them against applicant profiles using Gemini AI, generates tailored multi-language cover letters, and submits applications via a Playwright browser agent — all from a password-protected web dashboard.
 
+> **Status:** Phases 1–5, 7–8 complete · Phase 6 (apply reliability) in progress
+
 ---
 
 ## Features
 
-- **Automated scraping** — academicpositions.com (Livewire SPA), EURAXESS, jobs.ac.uk, phdscanner.com (JSON API), ae.indeed.com, Telegram public channels; multi-page pagination support
-- **AI matching** — Gemini 2.5 Flash scores each position against each applicant (field alignment, skills, research fit)
+- **Automated scraping** — 9 sources: EURAXESS, jobs.ac.uk, phdscanner.com, academicpositions.com, ae.indeed.com, nature.com/naturecareers, timeshighereducation.com, Telegram channels, any RSS/Atom feed; multi-page pagination; cross-source duplicate detection
+- **AI matching** — Gemini 2.5 Flash scores each position against each applicant using full CV/SOP text (field alignment, skills, research fit); auto-regenerates cover letters when profile changes
 - **Multi-language cover letters** — tailored academic cover letters in 18 languages, editable before approval
 - **Browser agent** — Playwright navigates to application portals, handles cookie consent, detects and fills forms, takes before/after screenshots
 - **CAPTCHA solving** — automatic reCAPTCHA v2 / hCaptcha solving via CapSolver API
@@ -16,7 +18,7 @@ An automated platform that discovers PhD and research positions from multiple jo
 - **Portal credentials vault** — store login credentials per applicant per portal
 - **Review queue** — human-in-the-loop: review cover letter, then approve to trigger auto-submission
 - **Analytics dashboard** — pipeline funnel, match/submission rates per source and per applicant
-- **Rich dashboard** — sortable tables, applicant filter, batch operations, reliability score per source
+- **Rich dashboard** — sortable tables, applicant filter, batch operations, reliability score + match yield per source
 - **Production-ready** — systemd service, HTTP Basic Auth, log rotation
 
 ---
@@ -115,6 +117,7 @@ SCREENSHOTS_DIR=/path/to/ARIA/screenshots
 DASHBOARD_USER=admin
 DASHBOARD_PASS=your-strong-password
 CAPTCHA_API_KEY=your-capsolver-key   # optional
+FINDAPHD_PROXY=                      # optional — residential proxy for findaphd.com, e.g. http://user:pass@brd.superproxy.io:22225
 ```
 
 ### Run (development)
@@ -158,6 +161,55 @@ export default {
 
 Set `GEMINI_PROXY_URL` to your Worker URL.
 
+### findaphd.com — Residential Proxy (optional)
+
+findaphd.com is behind Cloudflare's **managed challenge**, which blocks all datacenter IPs regardless of browser fingerprinting. The only reliable bypass is routing traffic through a **residential IP**. Two recommended providers:
+
+#### Option A — Bright Data
+
+1. Sign up at [brightdata.com](https://brightdata.com) → create a **Residential** proxy zone
+2. Get your proxy endpoint: `http://USERNAME:PASSWORD@brd.superproxy.io:22225`
+3. Add to `.env`:
+
+```env
+FINDAPHD_PROXY=http://USERNAME:PASSWORD@brd.superproxy.io:22225
+```
+
+Pricing: pay-as-you-go from ~$8.40/GB. Free trial available.
+
+#### Option B — Oxylabs
+
+1. Sign up at [oxylabs.io](https://oxylabs.io) → create a **Residential Proxies** subscription
+2. Get your endpoint: `http://USERNAME:PASSWORD@pr.oxylabs.io:7777`
+3. Add to `.env`:
+
+```env
+FINDAPHD_PROXY=http://USERNAME:PASSWORD@pr.oxylabs.io:7777
+```
+
+Pricing: from $8/GB. 7-day free trial available.
+
+#### Wiring the proxy into ARIA
+
+Once `FINDAPHD_PROXY` is set in `.env`, add it to `core/config.py`:
+
+```python
+FINDAPHD_PROXY = os.getenv("FINDAPHD_PROXY", "")
+```
+
+Then in `backend/agent/scraper.py`, pass it to the Playwright context inside `_fetch_findaphd()`:
+
+```python
+from core.config import FINDAPHD_PROXY
+# ...
+ctx = await browser.new_context(
+    proxy={"server": FINDAPHD_PROXY} if FINDAPHD_PROXY else None,
+    ...
+)
+```
+
+> Note: Both `camoufox` and `rebrowser-playwright` were tested — both return 403 without a residential proxy. The block is IP-based, not fingerprint-based.
+
 ---
 
 ## Usage
@@ -185,7 +237,7 @@ Set `GEMINI_PROXY_URL` to your Worker URL.
 | nature.com/naturecareers | HTTP + BeautifulSoup | ~20 results/page |
 | timeshighereducation.com/unijobs | HTTP + BeautifulSoup | ~30 results/page |
 | Any RSS/Atom feed | HTTP + XML parsing | Auto-detected from URL |
-| findaphd.com | Playwright + stealth | Cloudflare blocks headless — returns 0 |
+| findaphd.com | Playwright + stealth | Cloudflare managed-challenge blocks all headless browsers (datacenter IP); requires residential proxy — see below |
 
 ---
 
@@ -246,7 +298,7 @@ Set `GEMINI_PROXY_URL` to your Worker URL.
 - [x] timeshighereducation.com/unijobs — HTTP scraper (shared parser with Nature Careers)
 - [x] RSS/Atom feed support — any source exposing a feed, auto-detected from URL
 - [x] Duplicate detection — normalised title+university comparison across all sources
-- [ ] findaphd.com — stealth Playwright installed but Cloudflare still blocks headless
+- [ ] findaphd.com — `playwright-stealth` + `camoufox` both tested, both blocked at IP level; requires residential proxy (Bright Data / Oxylabs) — see setup guide above
 - [ ] ScholarshipDB, ResearchGate Jobs
 - [ ] University career portals (direct scraping, autonomous method selection)
 

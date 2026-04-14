@@ -4,6 +4,8 @@ sqlmodel
 httpx
 beautifulsoup4
 playwright
+playwright-stealth
+camoufox
 python-dotenv
 python-multipart
 aiofiles
