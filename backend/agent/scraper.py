@@ -64,7 +64,11 @@ async def scrape_source(source_id: int) -> List[int]:
             if session.exec(
                 select(Position).where(Position.apply_url == apply_url)
             ).first():
-                continue  # already in DB
+                continue  # already in DB (exact URL match)
+
+            if _is_duplicate(session, item.get("title", ""), item.get("university", "")):
+                logger.debug("Duplicate skipped: %s @ %s", item.get("title", "")[:60], item.get("university", ""))
+                continue
 
             pos = Position(
                 source_id=source_id,
@@ -98,16 +102,19 @@ async def _fetch_all_pages(
 ) -> List[Dict]:
     """Walk paginated results, preserving original query params on every page."""
     # Dispatch to specialised fetchers before trying generic HTML
+    if _looks_like_rss(start_url):
+        return await _fetch_rss(client, start_url)
     if "t.me" in start_url:
         return await _fetch_telegram(client, start_url)
     if "phdscanner.com" in start_url:
         return await _fetch_phdscanner_api(client, start_url, max_pages=10)
     if "academicpositions.com" in start_url:
         return await _fetch_academicpositions(start_url, max_pages=3)
-    if "findaphd.com" in start_url or "indeed.com" in start_url:
-        # For indeed.com bare URLs, append a default PhD search
+    if "findaphd.com" in start_url:
+        return await _fetch_findaphd(start_url, max_pages=5)
+    if "indeed.com" in start_url:
         fetch_url = start_url
-        if "indeed.com" in start_url and not parse_qs(urlparse(start_url).query).get("q"):
+        if not parse_qs(urlparse(start_url).query).get("q"):
             parsed_su = urlparse(start_url)
             fetch_url = urlunparse((
                 parsed_su.scheme, parsed_su.netloc, "/jobs",
@@ -494,6 +501,8 @@ async def _parse(
         return _parse_findaphd(soup, base_url)
     if "indeed.com" in base_url:
         return _parse_indeed(soup, base_url)
+    if "nature.com" in base_url or "timeshighereducation.com" in base_url:
+        return _parse_nature_careers(soup, base_url)
     return _parse_generic(soup, base_url)
 
 
@@ -741,6 +750,215 @@ def _parse_indeed(soup: BeautifulSoup, base_url: str) -> List[Dict]:
         if _is_relevant(pos):
             results.append(pos)
     return results
+
+
+# ── RSS / Atom feed support ───────────────────────────────────────────────────
+
+def _looks_like_rss(url: str) -> bool:
+    """Return True if the URL looks like an RSS or Atom feed."""
+    path     = urlparse(url).path.lower()
+    qs       = urlparse(url).query.lower()
+    last_seg = path.rstrip("/").rsplit("/", 1)[-1]   # e.g. "jobsrss" from /naturecareers/jobsrss/
+    return (
+        path.endswith((".rss", ".xml", ".atom"))
+        or "/feed" in path
+        or "/rss"  in path
+        or "rss" in last_seg
+        or "feed" in last_seg
+        or "feed=rss" in qs
+        or "format=rss" in qs
+    )
+
+
+async def _fetch_rss(client: httpx.AsyncClient, url: str) -> List[Dict]:
+    """Parse an RSS 2.0 or Atom 1.0 feed and return position dicts."""
+    import xml.etree.ElementTree as ET
+
+    try:
+        resp = await client.get(url, headers={**HEADERS, "Accept": "application/rss+xml,application/xml,text/xml,*/*"})
+        resp.raise_for_status()
+        root = ET.fromstring(resp.text)
+    except Exception as exc:
+        logger.error("RSS fetch/parse failed for %s: %s", url, exc)
+        return []
+
+    results: List[Dict] = []
+    ns = {"atom": "http://www.w3.org/2005/Atom", "dc": "http://purl.org/dc/elements/1.1/"}
+
+    # RSS 2.0
+    for item in root.findall(".//item"):
+        def _t(tag: str) -> str:
+            el = item.find(tag)
+            return (el.text or "").strip() if el is not None else ""
+
+        title       = _t("title")
+        apply_url   = _t("link")
+        description = BeautifulSoup(_t("description"), "html.parser").get_text(separator=" ", strip=True)
+        university  = _t("dc:creator") or _t("{http://purl.org/dc/elements/1.1/}creator")
+        deadline    = _t("pubDate") or None
+
+        pos = {"title": title, "university": university, "country": "",
+               "deadline": deadline, "description": description[:1000],
+               "apply_url": apply_url, "raw_html": ""}
+        if apply_url and _is_relevant(pos):
+            results.append(pos)
+
+    # Atom 1.0
+    if not results:
+        for entry in root.findall("atom:entry", ns) or root.findall("{http://www.w3.org/2005/Atom}entry"):
+            def _at(tag: str) -> str:
+                el = entry.find(tag, ns) or entry.find("{http://www.w3.org/2005/Atom}" + tag.split(":")[-1])
+                return (el.text or "").strip() if el is not None else ""
+
+            title     = _at("atom:title")
+            link_el   = entry.find("atom:link", ns) or entry.find("{http://www.w3.org/2005/Atom}link")
+            apply_url = (link_el.get("href", "") if link_el is not None else "")
+            summary   = BeautifulSoup(_at("atom:summary") or _at("atom:content"), "html.parser").get_text(separator=" ", strip=True)
+            author_el = entry.find("atom:author/atom:name", ns)
+            university = (author_el.text or "").strip() if author_el is not None else ""
+
+            pos = {"title": title, "university": university, "country": "",
+                   "deadline": None, "description": summary[:1000],
+                   "apply_url": apply_url, "raw_html": ""}
+            if apply_url and _is_relevant(pos):
+                results.append(pos)
+
+    logger.info("RSS %s: collected %d items", url, len(results))
+    return results
+
+
+# ── Nature Careers / Times Higher Education (shared HTML structure) ────────────
+
+def _parse_nature_careers(soup: BeautifulSoup, base_url: str) -> List[Dict]:
+    """Parse job listings from nature.com/naturecareers or timeshighereducation.com/unijobs."""
+    results = []
+    for item in soup.select("li.lister__item"):
+        title_el = item.select_one("h3.lister__header a, h2.lister__header a")
+        if not title_el:
+            continue
+        href = title_el.get("href", "")
+        if not href:
+            continue
+        if not href.startswith("http"):
+            href = urljoin(base_url, href)
+
+        # Metadata list items: typically [institution, location, salary]
+        meta_items = [li.get_text(strip=True) for li in item.select("ul.lister__meta li.lister__meta-item")]
+        university = meta_items[0] if meta_items else ""
+        country    = meta_items[1] if len(meta_items) > 1 else ""
+
+        desc_el = item.select_one("p.lister__description")
+        description = desc_el.get_text(separator=" ", strip=True) if desc_el else ""
+
+        # Closing date
+        date_el = item.select_one("time, .lister__closing-date, [class*='closing']")
+        deadline = date_el.get_text(strip=True) if date_el else None
+
+        pos = {
+            "title":       title_el.get_text(strip=True),
+            "university":  university,
+            "country":     country,
+            "deadline":    deadline,
+            "description": description,
+            "apply_url":   href,
+            "raw_html":    "",
+        }
+        if _is_relevant(pos):
+            results.append(pos)
+    return results
+
+
+# ── findaphd.com via playwright-stealth ───────────────────────────────────────
+
+async def _fetch_findaphd(start_url: str, max_pages: int = 5) -> List[Dict]:
+    """Scrape findaphd.com using stealth Playwright to bypass Cloudflare JS challenge."""
+    from playwright.async_api import async_playwright
+    try:
+        from playwright_stealth import Stealth
+        _stealth = Stealth()
+    except ImportError:
+        logger.error("playwright-stealth not installed; run: pip install playwright-stealth")
+        return []
+
+    parsed = urlparse(start_url)
+    qs     = parse_qs(parsed.query)
+    keyword = qs.get("Keywords", qs.get("keywords", ["phd"]))[0]
+
+    results: List[Dict] = []
+
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True, args=["--no-sandbox"])
+        ctx = await browser.new_context(
+            viewport={"width": 1280, "height": 900},
+            user_agent=(
+                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+            ),
+            locale="en-GB",
+        )
+        page = await ctx.new_page()
+        await _stealth.apply_stealth_async(page)
+
+        for page_num in range(1, max_pages + 1):
+            page_url = f"https://www.findaphd.com/phds/?Keywords={keyword}&PG={page_num}"
+            try:
+                resp = await page.goto(page_url, wait_until="domcontentloaded", timeout=30_000)
+                if resp and resp.status in (403, 429):
+                    logger.warning("findaphd.com blocked (page %d): %d", page_num, resp.status)
+                    break
+
+                # Check for Cloudflare challenge
+                title = await page.title()
+                if "just a moment" in title.lower() or "cloudflare" in title.lower():
+                    logger.warning("findaphd.com: Cloudflare challenge on page %d", page_num)
+                    break
+
+                # Wait for results
+                try:
+                    await page.wait_for_selector(
+                        "div.phd-result, div.ResultItem, .phd-result__title",
+                        timeout=10_000
+                    )
+                except Exception:
+                    logger.warning("findaphd.com: no results selector on page %d", page_num)
+                    break
+
+                html = await page.content()
+            except Exception as exc:
+                logger.error("findaphd.com Playwright error page %d: %s", page_num, exc)
+                break
+
+            soup = BeautifulSoup(html, "html.parser")
+            page_results = _parse_findaphd(soup, start_url)
+            if not page_results:
+                break
+            results.extend(page_results)
+
+        await browser.close()
+
+    logger.info("findaphd.com: collected %d positions", len(results))
+    return results
+
+
+# ── Duplicate detection ───────────────────────────────────────────────────────
+
+def _is_duplicate(session, title: str, university: str) -> bool:
+    """Return True if a position with the same normalised title+university already exists."""
+    if not title or not university:
+        return False
+
+    def _norm(s: str) -> str:
+        return re.sub(r"[^a-z0-9 ]", "", s.lower()).strip()
+
+    nt = _norm(title)
+    nu = _norm(university)
+    if not nt or not nu:
+        return False
+
+    for p in session.exec(select(Position)).all():
+        if _norm(p.title) == nt and _norm(p.university) == nu:
+            return True
+    return False
 
 
 # ── Generic fallback ──────────────────────────────────────────────────────────
