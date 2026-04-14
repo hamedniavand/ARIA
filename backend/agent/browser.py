@@ -10,7 +10,8 @@ import httpx
 from playwright.async_api import async_playwright
 
 from core.config import (
-    GEMINI_API_KEY, GEMINI_PROXY_URL, GEMINI_MODEL, SCREENSHOTS_DIR, UPLOADS_DIR
+    GEMINI_API_KEY, GEMINI_PROXY_URL, GEMINI_MODEL,
+    SCREENSHOTS_DIR, UPLOADS_DIR, CAPTCHA_API_KEY,
 )
 
 logger = logging.getLogger(__name__)
@@ -162,7 +163,21 @@ async def _run_browser(
                 return "Form submitted via Playwright"
 
             elif page_type == "captcha":
-                raise RuntimeError("CAPTCHA detected — manual intervention needed")
+                solved = await _solve_captcha(page, analysis)
+                if solved:
+                    await page.wait_for_timeout(2000)
+                    analysis = await _analyse_page(page)
+                    page_type = analysis.get("type", "unknown")
+                    if page_type == "form":
+                        await _fill_form(page, analysis, appl, cover_letter, cv_paths)
+                        prefill_path = _SHOTS / f"app_{app_id}_prefill.png"
+                        await page.screenshot(path=str(prefill_path), full_page=False)
+                        await _submit_form(page, analysis)
+                        await page.wait_for_timeout(3000)
+                        submitted_path = _SHOTS / f"app_{app_id}_submitted.png"
+                        await page.screenshot(path=str(submitted_path), full_page=False)
+                        return "Form submitted after CAPTCHA solve"
+                raise RuntimeError("CAPTCHA detected — could not solve automatically")
 
             elif page_type == "info":
                 # Listing/info page — try to find and click an Apply button
@@ -431,6 +446,93 @@ def _label_selectors(label: str) -> list:
         f'label:has-text("{label}") + input',
         f'label:has-text("{label}") + textarea',
     ]
+
+
+async def _solve_captcha(page, analysis: dict) -> bool:
+    """Attempt to solve a CAPTCHA using CapSolver API. Returns True if solved."""
+    from core.config import CAPTCHA_API_KEY
+    if not CAPTCHA_API_KEY:
+        logger.warning("CAPTCHA detected but CAPTCHA_API_KEY not set")
+        return False
+
+    url = page.url
+    captcha_type = analysis.get("captcha_type", "").lower()
+
+    try:
+        # Detect sitekey from page HTML
+        html = await page.content()
+        import re
+
+        # reCAPTCHA v2
+        recaptcha_match = re.search(
+            r'["\']?(?:data-sitekey|sitekey)["\']?\s*[=:]\s*["\']([^"\']{20,})["\']',
+            html, re.IGNORECASE
+        )
+        # hCaptcha
+        hcaptcha_match = re.search(
+            r'hcaptcha\.com.*?data-sitekey=["\']([^"\']+)["\']', html, re.IGNORECASE
+        )
+
+        async with httpx.AsyncClient(timeout=120) as client:
+            if hcaptcha_match:
+                sitekey = hcaptcha_match.group(1)
+                logger.info("Attempting hCaptcha solve, sitekey=%s", sitekey[:10])
+                task = {"type": "HCaptchaTaskProxyLess", "websiteURL": url, "websiteKey": sitekey}
+            elif recaptcha_match:
+                sitekey = recaptcha_match.group(1)
+                logger.info("Attempting reCAPTCHA solve, sitekey=%s", sitekey[:10])
+                task = {"type": "ReCaptchaV2TaskProxyLess", "websiteURL": url, "websiteKey": sitekey}
+            else:
+                logger.warning("CAPTCHA sitekey not found in page HTML")
+                return False
+
+            # Create task
+            create_resp = await client.post(
+                "https://api.capsolver.com/createTask",
+                json={"clientKey": CAPTCHA_API_KEY, "task": task},
+            )
+            create_resp.raise_for_status()
+            task_id = create_resp.json().get("taskId")
+            if not task_id:
+                logger.warning("CapSolver task creation failed: %s", create_resp.text[:200])
+                return False
+
+            # Poll for result (up to 90s)
+            import asyncio as _asyncio
+            for _ in range(30):
+                await _asyncio.sleep(3)
+                result_resp = await client.post(
+                    "https://api.capsolver.com/getTaskResult",
+                    json={"clientKey": CAPTCHA_API_KEY, "taskId": task_id},
+                )
+                result = result_resp.json()
+                if result.get("status") == "ready":
+                    token = result["solution"].get("gRecaptchaResponse") or result["solution"].get("gRecaptchaResponse")
+                    if token:
+                        # Inject token into page
+                        await page.evaluate(f"""
+                            (function(){{
+                                var el = document.getElementById('g-recaptcha-response') ||
+                                         document.querySelector('[name="h-captcha-response"]') ||
+                                         document.querySelector('[name="g-recaptcha-response"]');
+                                if (el) {{ el.value = '{token}'; }}
+                                // Trigger callbacks registered by the CAPTCHA widget
+                                if (window.captchaCallback) window.captchaCallback('{token}');
+                                if (window.onCaptchaSuccess) window.onCaptchaSuccess('{token}');
+                            }})()
+                        """)
+                        logger.info("CAPTCHA token injected successfully")
+                        return True
+                elif result.get("status") == "failed":
+                    logger.warning("CapSolver task failed: %s", result.get("errorDescription"))
+                    return False
+
+            logger.warning("CAPTCHA solve timed out")
+            return False
+
+    except Exception as exc:
+        logger.error("CAPTCHA solve error: %s", exc)
+        return False
 
 
 async def _submit_form(page, analysis: dict) -> None:

@@ -11,6 +11,7 @@ class Applicant(SQLModel, table=True):
     email: str
     field_of_study: str
     bio: str = ""
+    preferred_language: str = "English"
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
 

@@ -34,8 +34,9 @@ async def generate_cover_letter(position, applicant, docs: list) -> str:
     """Return a tailored academic cover letter (plain text, no signature block)."""
     cv = _doc_summary(docs, "cv")
     sop = _doc_summary(docs, "sop")
+    language = getattr(applicant, "preferred_language", "English") or "English"
 
-    prompt = f"""Write a tailored PhD application cover letter.
+    prompt = f"""Write a tailored PhD application cover letter in {language}.
 
 POSITION:
 Title: {position.title}
@@ -52,7 +53,7 @@ CV summary: {cv[:800]}
 Statement of purpose: {sop[:500]}
 
 Rules:
-- 400-600 words, formal academic tone
+- 400-600 words, formal academic tone, written entirely in {language}
 - Reference specific research themes or lab focus from the job description
 - Show concrete alignment between applicant background and position requirements
 - Do NOT open with "I am writing to express my interest"

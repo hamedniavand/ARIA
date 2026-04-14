@@ -15,6 +15,8 @@ BASE_URL: str = os.getenv("BASE_URL", "http://localhost:8000")
 SCREENSHOTS_DIR: str = os.getenv("SCREENSHOTS_DIR", "/root/ARIA/screenshots")
 DB_PATH: str = os.getenv("DB_PATH", "/root/ARIA/aria.db")
 UPLOADS_DIR: str = os.getenv("UPLOADS_DIR", "/root/ARIA/uploads")
+DASHBOARD_USER: str = os.getenv("DASHBOARD_USER", "admin")
+DASHBOARD_PASS: str = os.getenv("DASHBOARD_PASS", "changeme")
 
 os.makedirs(SCREENSHOTS_DIR, exist_ok=True)
 os.makedirs(UPLOADS_DIR, exist_ok=True)

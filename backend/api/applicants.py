@@ -23,6 +23,7 @@ class ApplicantUpdate(BaseModel):
     email: Optional[str] = None
     field_of_study: Optional[str] = None
     bio: Optional[str] = None
+    preferred_language: Optional[str] = None
 
 
 class CredentialIn(BaseModel):
