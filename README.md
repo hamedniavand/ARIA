@@ -229,10 +229,26 @@ Set `GEMINI_PROXY_URL` to your Worker URL.
 - [x] Multi-language cover letters (18 languages, per-applicant setting)
 - [x] CAPTCHA solving (CapSolver integration — reCAPTCHA v2 + hCaptcha)
 - [x] Analytics dashboard (pipeline funnel, match rate, submission rate by source and applicant)
-- [ ] Scheduled scans (cron — auto-scan active sources daily/weekly)
-- [ ] Email/Telegram notifications for new matches and submissions
-- [ ] Duplicate position detection across sources
-- [ ] Application outcome tracking (interview invited, rejected, offer received)
+
+### 🔲 Phase 6 — Apply Fix
+- [ ] Reliable form submission across common portal types (jobs.ac.uk, EURAXESS, university HR systems)
+- [ ] Smarter multi-step navigation: listing → apply page → form, with re-analysis at each step
+- [ ] Better field mapping: robust detection of name / email / cover letter / CV upload fields
+- [ ] Login flow handling: detect and complete multi-step login before reaching the form
+- [ ] Graceful fallback: if form cannot be auto-filled, set status to "manual" with a direct link and screenshots
+- *Correctness over speed — Playwright browser approach preferred even if slower*
+
+### 🔲 Phase 7 — More Sources
+- [ ] findaphd.com — stealth Playwright to bypass Cloudflare JS challenge
+- [ ] ScholarshipDB, ResearchGate Jobs
+- [ ] University career portals (direct scraping, autonomous method selection)
+- [ ] RSS/Atom feed support — any source exposing a feed
+- [ ] Duplicate detection — merge positions from different sources that are the same job
+
+### 🔲 Phase 8 — Intelligence Upgrades
+- [ ] Smarter matching — score against full CV text, not just the AI summary
+- [ ] Auto-regenerate cover letters when applicant profile is updated
+- [ ] Position quality scoring — rank sources by match yield, not just data completeness
 
 ---
 
