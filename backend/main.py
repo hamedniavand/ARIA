@@ -1,20 +1,43 @@
+import base64
+import secrets
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from sqlmodel import Session, select, func
+from starlette.middleware.base import BaseHTTPMiddleware
 
 from core.database import init_db, engine
-from core.config import SCREENSHOTS_DIR
+from core.config import SCREENSHOTS_DIR, DASHBOARD_USER, DASHBOARD_PASS
 from api.applicants import router as applicants_router
 from api.positions import router as positions_router
 from api.applications import router as applications_router
 from api.sources import router as sources_router
 
 FRONTEND_DIR = Path(__file__).parent.parent / "frontend"
+
+
+class BasicAuthMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        if request.url.path == "/api/health":
+            return await call_next(request)
+        auth = request.headers.get("Authorization", "")
+        if auth.startswith("Basic "):
+            try:
+                decoded = base64.b64decode(auth[6:]).decode()
+                user, _, pwd = decoded.partition(":")
+                if secrets.compare_digest(user, DASHBOARD_USER) and \
+                   secrets.compare_digest(pwd,  DASHBOARD_PASS):
+                    return await call_next(request)
+            except Exception:
+                pass
+        return Response(
+            status_code=401,
+            headers={"WWW-Authenticate": 'Basic realm="ARIA"'},
+        )
 
 
 @asynccontextmanager
@@ -25,6 +48,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="ARIA — Academic Research & Intelligence Agent", lifespan=lifespan)
 
+app.add_middleware(BasicAuthMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
