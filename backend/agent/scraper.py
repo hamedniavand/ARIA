@@ -101,13 +101,21 @@ async def _fetch_all_pages(
     if "phdscanner.com" in start_url:
         return await _fetch_phdscanner_api(client, start_url, max_pages=10)
     if "findaphd.com" in start_url or "indeed.com" in start_url:
+        # For indeed.com bare URLs, append a default PhD search
+        fetch_url = start_url
+        if "indeed.com" in start_url and not parse_qs(urlparse(start_url).query).get("q"):
+            parsed_su = urlparse(start_url)
+            fetch_url = urlunparse((
+                parsed_su.scheme, parsed_su.netloc, "/jobs",
+                "", urlencode({"q": "phd", "l": ""}), ""
+            ))
         try:
-            html = await _fetch_page_playwright(start_url)
+            html = await _fetch_page_playwright(fetch_url)
         except Exception as exc:
-            logger.error("Playwright fetch failed for %s: %s", start_url, exc)
+            logger.error("Playwright fetch failed for %s: %s", fetch_url, exc)
             return []
         soup = BeautifulSoup(html, "html.parser")
-        return await _parse(soup, start_url, client)
+        return await _parse(soup, fetch_url, client)
 
     results: List[Dict] = []
     current_url: Optional[str] = start_url
@@ -140,24 +148,26 @@ async def _fetch_all_pages(
 async def _fetch_phdscanner_api(
     client: httpx.AsyncClient, start_url: str, max_pages: int = 10
 ) -> List[Dict]:
-    """Call the phdscanner.com undocumented REST API and return structured positions."""
+    """Call the phdscanner.com REST API using offset-based pagination."""
     parsed = urlparse(start_url)
     qs = parse_qs(parsed.query)
     keyword = qs.get("search", qs.get("Keywords", ["phd"]))[0]
 
     api_base = "https://www.phdscanner.com/api/opportunities"
+    limit = 25
     results: List[Dict] = []
 
-    for page in range(1, max_pages + 1):
+    for page in range(max_pages):
+        offset = page * limit
         try:
             resp = await client.get(
                 api_base,
-                params={"page": page, "limit": 25, "search": keyword},
+                params={"limit": limit, "offset": offset, "search": keyword},
             )
             resp.raise_for_status()
             data = resp.json()
         except Exception as exc:
-            logger.warning("phdscanner API page %d failed: %s", page, exc)
+            logger.warning("phdscanner API offset=%d failed: %s", offset, exc)
             break
 
         items = data.get("data", [])
@@ -165,8 +175,8 @@ async def _fetch_phdscanner_api(
             break
 
         for item in items:
-            city    = item.get("city", "") or ""
-            country = item.get("country", "") or ""
+            city     = item.get("city", "") or ""
+            country  = item.get("country", "") or ""
             location = ", ".join(filter(None, [city, country]))
             apply_url = item.get("opportunity_url", "").strip()
             if not apply_url:
@@ -185,8 +195,7 @@ async def _fetch_phdscanner_api(
 
         pagination = data.get("pagination", {})
         total = pagination.get("total", 0)
-        limit = pagination.get("limit", 25)
-        if page * limit >= total:
+        if offset + limit >= total:
             break
 
     logger.info("phdscanner API: collected %d positions", len(results))
@@ -195,7 +204,7 @@ async def _fetch_phdscanner_api(
 
 # ── Playwright-based page fetcher (for Cloudflare-protected sites) ────────────
 
-async def _fetch_page_playwright(url: str, timeout_ms: int = 20_000) -> str:
+async def _fetch_page_playwright(url: str, timeout_ms: int = 30_000) -> str:
     """Render a page with Playwright and return the HTML source."""
     from playwright.async_api import async_playwright
 
@@ -210,8 +219,7 @@ async def _fetch_page_playwright(url: str, timeout_ms: int = 20_000) -> str:
         )
         page = await ctx.new_page()
         try:
-            await page.goto(url, wait_until="networkidle", timeout=timeout_ms)
-            # Detect Cloudflare challenge
+            await page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
             title = await page.title()
             if "just a moment" in title.lower() or "cloudflare" in title.lower():
                 raise RuntimeError(f"Cloudflare challenge on {url}: '{title}'")
@@ -463,26 +471,34 @@ def _parse_indeed(soup: BeautifulSoup, base_url: str) -> List[Dict]:
     parsed = urlparse(base_url)
     domain_root = f"{parsed.scheme}://{parsed.netloc}"
 
-    for item in soup.select("div.job_seen_beacon, li.css-5lfssm, div.result"):
-        title_el = item.select_one("h2.jobTitle a, h2 a[data-jk], a.jcs-JobTitle")
-        if not title_el:
+    for item in soup.select("div.job_seen_beacon, div.result"):
+        # Title is in h2; the link anchor carries data-jk
+        h2 = item.select_one("h2.jobTitle, h2")
+        if not h2:
+            continue
+        title_text = h2.get_text(strip=True)
+        if not title_text:
             continue
 
-        href = title_el.get("href", "")
-        jk = title_el.get("data-jk", "")
+        link = item.select_one("a[data-jk]")
+        jk = link.get("data-jk", "") if link else ""
         if jk:
             href = f"{domain_root}/viewjob?jk={jk}"
-        elif href:
-            if not href.startswith("http"):
+        elif link:
+            href = link.get("href", "")
+            if href and not href.startswith("http"):
                 href = urljoin(domain_root, href)
         else:
             continue
 
-        company_el  = item.select_one(".companyName, [data-testid='company-name']")
-        location_el = item.select_one(".companyLocation, [data-testid='text-location']")
+        if not href:
+            continue
+
+        company_el  = item.select_one("[data-testid='company-name'], .companyName")
+        location_el = item.select_one("[data-testid='text-location'], .companyLocation")
 
         pos = {
-            "title":       title_el.get_text(strip=True),
+            "title":       title_text,
             "university":  company_el.get_text(strip=True) if company_el else "",
             "country":     location_el.get_text(strip=True) if location_el else "",
             "deadline":    None,
