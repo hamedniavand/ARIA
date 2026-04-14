@@ -182,7 +182,10 @@ Set `GEMINI_PROXY_URL` to your Worker URL.
 | phdscanner.com | JSON API (offset pagination) | ~250 results/scan |
 | ae.indeed.com | Playwright | ~10-16 results/scan |
 | t.me/{channel} | HTTP (public preview) | Any public Telegram channel |
-| findaphd.com | Playwright | Cloudflare JS challenge — may be blocked |
+| nature.com/naturecareers | HTTP + BeautifulSoup | ~20 results/page |
+| timeshighereducation.com/unijobs | HTTP + BeautifulSoup | ~30 results/page |
+| Any RSS/Atom feed | HTTP + XML parsing | Auto-detected from URL |
+| findaphd.com | Playwright + stealth | Cloudflare blocks headless — returns 0 |
 
 ---
 
@@ -238,12 +241,14 @@ Set `GEMINI_PROXY_URL` to your Worker URL.
 - [ ] Graceful fallback: if form cannot be auto-filled, set status to "manual" with a direct link and screenshots
 - *Correctness over speed — Playwright browser approach preferred even if slower*
 
-### 🔲 Phase 7 — More Sources
-- [ ] findaphd.com — stealth Playwright to bypass Cloudflare JS challenge
+### ✅ Phase 7 — More Sources
+- [x] nature.com/naturecareers — HTTP scraper (20+ results/page)
+- [x] timeshighereducation.com/unijobs — HTTP scraper (shared parser with Nature Careers)
+- [x] RSS/Atom feed support — any source exposing a feed, auto-detected from URL
+- [x] Duplicate detection — normalised title+university comparison across all sources
+- [ ] findaphd.com — stealth Playwright installed but Cloudflare still blocks headless
 - [ ] ScholarshipDB, ResearchGate Jobs
 - [ ] University career portals (direct scraping, autonomous method selection)
-- [ ] RSS/Atom feed support — any source exposing a feed
-- [ ] Duplicate detection — merge positions from different sources that are the same job
 
 ### 🔲 Phase 8 — Intelligence Upgrades
 - [ ] Smarter matching — score against full CV text, not just the AI summary
