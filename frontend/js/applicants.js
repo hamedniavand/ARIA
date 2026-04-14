@@ -43,7 +43,7 @@ function renderApplicantGrid() {
         </div>
       </div>
       <div style="font-size:11px;color:#888780">${escHtml(a.email)}</div>
-      <div style="font-size:11px;color:#888780;margin-top:2px">${appCount} active application(s)</div>
+      <div style="font-size:11px;color:#888780;margin-top:2px">${appCount} active application(s) &nbsp;·&nbsp; ${escHtml(a.preferred_language||'English')}</div>
 
       <!-- Documents -->
       <div class="doc-list">
@@ -228,6 +228,12 @@ function showApplicantForm(id) {
       <input id="af-field" value="${escHtml(a.field_of_study || '')}" placeholder="e.g. Machine Learning, NLP, Robotics"></div>
     <div class="form-row"><label>Research Background / Bio</label>
       <textarea id="af-bio" placeholder="Brief summary of research interests and experience…">${escHtml(a.bio || '')}</textarea></div>
+    <div class="form-row"><label>Cover Letter Language</label>
+      <select id="af-lang">
+        ${['English','German','French','Dutch','Spanish','Italian','Portuguese','Swedish','Finnish','Norwegian','Danish','Polish','Turkish','Arabic','Chinese','Japanese','Korean'].map(l =>
+          `<option value="${l}"${(a.preferred_language||'English')===l?' selected':''}>${l}</option>`
+        ).join('')}
+      </select></div>
     <div class="form-actions">
       <button class="btn primary" onclick="saveApplicant()">Save</button>
       <button class="btn" onclick="cancelApplicantForm()">Cancel</button>
@@ -238,10 +244,11 @@ function showApplicantForm(id) {
 
 async function saveApplicant() {
   const data = {
-    name:           document.getElementById('af-name').value.trim(),
-    email:          document.getElementById('af-email').value.trim(),
-    field_of_study: document.getElementById('af-field').value.trim(),
-    bio:            document.getElementById('af-bio').value.trim(),
+    name:               document.getElementById('af-name').value.trim(),
+    email:              document.getElementById('af-email').value.trim(),
+    field_of_study:     document.getElementById('af-field').value.trim(),
+    bio:                document.getElementById('af-bio').value.trim(),
+    preferred_language: document.getElementById('af-lang').value,
   };
   if (!data.name || !data.email) { toast('Name and email are required', 'error'); return; }
   try {

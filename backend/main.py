@@ -92,6 +92,98 @@ def health():
     return {"status": "ok", "version": "1.0.0"}
 
 
+@app.get("/api/analytics")
+def get_analytics():
+    """Per-source and per-applicant pipeline analytics."""
+    from models.application import Application, ApplicationStatus
+    from models.position import Position
+    from models.source import Source
+    from models.applicant import Applicant
+
+    with Session(engine) as s:
+        sources   = s.exec(select(Source)).all()
+        applicants = s.exec(select(Applicant)).all()
+        positions  = s.exec(select(Position)).all()
+        apps       = s.exec(select(Application)).all()
+
+    pos_map = {p.id: p for p in positions}
+    apps_by_src: dict[int, list] = {}
+    for a in apps:
+        pos = pos_map.get(a.position_id)
+        if pos:
+            apps_by_src.setdefault(pos.source_id, []).append(a)
+
+    apps_by_appl: dict[int, list] = {}
+    for a in apps:
+        apps_by_appl.setdefault(a.applicant_id, []).append(a)
+
+    pos_by_src: dict[int, list] = {}
+    for p in positions:
+        pos_by_src.setdefault(p.source_id, []).append(p)
+
+    def _pct(num, den):
+        return round(num / den * 100, 1) if den else 0.0
+
+    by_source = []
+    for src in sources:
+        src_pos   = pos_by_src.get(src.id, [])
+        src_apps  = apps_by_src.get(src.id, [])
+        matched   = [a for a in src_apps if a.match_score >= 70]
+        submitted = [a for a in src_apps if a.status == ApplicationStatus.submitted]
+        errors    = [a for a in src_apps if a.status == ApplicationStatus.error]
+        avg_score = round(sum(a.match_score for a in matched) / len(matched), 1) if matched else 0.0
+        by_source.append({
+            "source_id":       src.id,
+            "label":           src.label,
+            "positions":       len(src_pos),
+            "matched":         len(matched),
+            "submitted":       len(submitted),
+            "errors":          len(errors),
+            "match_rate":      _pct(len(matched),   len(src_apps)),
+            "submit_rate":     _pct(len(submitted), len(matched)),
+            "avg_score":       avg_score,
+        })
+
+    by_applicant = []
+    for appl in applicants:
+        appl_apps  = apps_by_appl.get(appl.id, [])
+        matched    = [a for a in appl_apps if a.match_score >= 70]
+        submitted  = [a for a in appl_apps if a.status == ApplicationStatus.submitted]
+        errors     = [a for a in appl_apps if a.status == ApplicationStatus.error]
+        avg_score  = round(sum(a.match_score for a in matched) / len(matched), 1) if matched else 0.0
+        by_applicant.append({
+            "applicant_id":    appl.id,
+            "name":            appl.name,
+            "field":           appl.field_of_study,
+            "total_apps":      len(appl_apps),
+            "matched":         len(matched),
+            "submitted":       len(submitted),
+            "errors":          len(errors),
+            "match_rate":      _pct(len(matched),   len(appl_apps)),
+            "submit_rate":     _pct(len(submitted), len(matched)),
+            "avg_score":       avg_score,
+        })
+
+    # Overall funnel
+    total_pos  = len(positions)
+    total_match = len([a for a in apps if a.match_score >= 70])
+    total_sub   = len([a for a in apps if a.status == ApplicationStatus.submitted])
+    total_err   = len([a for a in apps if a.status == ApplicationStatus.error])
+    total_ready = len([a for a in apps if a.status == ApplicationStatus.ready])
+
+    return {
+        "funnel": {
+            "discovered": total_pos,
+            "matched":    total_match,
+            "ready":      total_ready,
+            "submitted":  total_sub,
+            "errors":     total_err,
+        },
+        "by_source":    by_source,
+        "by_applicant": by_applicant,
+    }
+
+
 # ── Static files (must come after API routes) ─────────────────────────────────
 app.mount("/css",         StaticFiles(directory=str(FRONTEND_DIR / "css")), name="css")
 app.mount("/js",          StaticFiles(directory=str(FRONTEND_DIR / "js")),  name="js")

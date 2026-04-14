@@ -98,6 +98,8 @@ async def _fetch_all_pages(
 ) -> List[Dict]:
     """Walk paginated results, preserving original query params on every page."""
     # Dispatch to specialised fetchers before trying generic HTML
+    if "t.me" in start_url:
+        return await _fetch_telegram(client, start_url)
     if "phdscanner.com" in start_url:
         return await _fetch_phdscanner_api(client, start_url, max_pages=10)
     if "academicpositions.com" in start_url:
@@ -141,6 +143,135 @@ async def _fetch_all_pages(
             current_url = _merge_url(start_url, next_el["href"])
         else:
             break
+
+    return results
+
+
+# ── Telegram public channel scraper ──────────────────────────────────────────
+
+async def _fetch_telegram(client: httpx.AsyncClient, start_url: str, max_pages: int = 5) -> List[Dict]:
+    """Scrape a public Telegram channel via t.me/s/{channel}.
+    Supports URLs like: https://t.me/phd_positions or https://t.me/s/phd_positions
+    """
+    parsed = urlparse(start_url)
+    # Normalise to /s/ preview URL
+    path = parsed.path.rstrip("/")
+    if not path.startswith("/s/"):
+        path = "/s" + path
+    base_preview = f"https://t.me{path}"
+
+    results: List[Dict] = []
+    current_url = base_preview
+
+    for _ in range(max_pages):
+        try:
+            resp = await client.get(current_url, headers={
+                **HEADERS,
+                "Accept": "text/html,application/xhtml+xml",
+            })
+            resp.raise_for_status()
+        except Exception as exc:
+            logger.warning("Telegram fetch failed %s: %s", current_url, exc)
+            break
+
+        soup = BeautifulSoup(resp.text, "html.parser")
+        page_results = _parse_telegram(soup, base_preview)
+        if not page_results:
+            break
+        results.extend(page_results)
+
+        # Pagination: "Load more" link uses ?before=<msg_id>
+        load_more = soup.select_one("a.tme_messages_more, a[data-before]")
+        if load_more:
+            before_id = load_more.get("data-before") or ""
+            if before_id:
+                current_url = f"{base_preview}?before={before_id}"
+            else:
+                break
+        else:
+            break
+
+    logger.info("Telegram %s: collected %d posts", base_preview, len(results))
+    return results
+
+
+def _parse_telegram(soup: BeautifulSoup, channel_url: str) -> List[Dict]:
+    """Parse job posts from a Telegram channel preview page."""
+    results = []
+    seen_urls: set = set()
+
+    for msg in soup.select(".tgme_widget_message"):
+        text_el = msg.select_one(".tgme_widget_message_text")
+        if not text_el:
+            continue
+        text = text_el.get_text(separator="\n", strip=True)
+        if not text or len(text) < 30:
+            continue
+
+        # Permalink to this specific message (used as dedup key and fallback url)
+        msg_link = msg.select_one("a.tgme_widget_message_date")
+        permalink = msg_link["href"] if msg_link and msg_link.get("href") else ""
+        if not permalink or permalink in seen_urls:
+            continue
+        seen_urls.add(permalink)
+
+        # Prefer a real external apply URL over the telegram permalink
+        external_links = [
+            a["href"] for a in text_el.find_all("a", href=True)
+            if a["href"].startswith("http") and "t.me" not in a["href"]
+        ]
+        apply_url = external_links[0] if external_links else permalink
+
+        # Collect hashtag values for metadata
+        hashtags = [
+            a.get_text(strip=True).lstrip("#")
+            for a in text_el.select("a[href^='?q=']")
+        ]
+
+        # Lines that aren't hashtags and aren't raw URLs
+        content_lines = [
+            l.strip() for l in text.splitlines()
+            if l.strip()
+            and not l.strip().startswith("#")
+            and not l.strip().startswith("http")
+        ]
+
+        # Title: prefer line that mentions a position type; fall back to first long line
+        _title_kws = ("phd", "postdoc", "fellowship", "position", "vacancy",
+                      "researcher", "studentship", "doctorate", "doctoral")
+        title_lines = [l for l in content_lines if len(l) > 10]
+        position_lines = [l for l in title_lines if any(k in l.lower() for k in _title_kws)]
+        title = (position_lines[0] if position_lines else (title_lines[0] if title_lines else text[:80]))[:150]
+
+        # University: line containing an institution keyword
+        university = ""
+        for kw in ("University", "Institut", "College", "School", "Laboratory", "Centre", "Center"):
+            for line in content_lines:
+                if kw in line:
+                    university = line[:100]
+                    break
+            if university:
+                break
+
+        # Country: hashtag that isn't a discipline keyword
+        _discipline_tags = {
+            "phd", "postdoc", "fellowship", "position", "job", "funded",
+            "research", "vacancy", "opening", "opportunity", "hiring",
+        }
+        country_tags = [t for t in hashtags if t.lower() not in _discipline_tags and len(t) <= 25]
+        country = country_tags[0].title() if country_tags else ""
+
+        pos = {
+            "title":       title,
+            "university":  university,
+            "country":     country,
+            "deadline":    None,
+            "description": text[:1000],
+            "apply_url":   apply_url,
+            "raw_html":    "",
+        }
+        if _is_relevant(pos):
+            results.append(pos)
 
     return results
 

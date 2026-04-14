@@ -151,7 +151,7 @@ function updateNavBadges(s = {}) {
 }
 
 // ── Router ────────────────────────────────────────────────────────────────────
-const VIEWS = ['queue', 'positions', 'errors', 'submitted', 'applicants', 'sources'];
+const VIEWS = ['queue', 'positions', 'errors', 'submitted', 'applicants', 'sources', 'analytics'];
 
 const VIEW_RENDERERS = {};  // populated by each view file
 
