@@ -100,6 +100,8 @@ async def _fetch_all_pages(
     # Dispatch to specialised fetchers before trying generic HTML
     if "phdscanner.com" in start_url:
         return await _fetch_phdscanner_api(client, start_url, max_pages=10)
+    if "academicpositions.com" in start_url:
+        return await _fetch_academicpositions(start_url, max_pages=3)
     if "findaphd.com" in start_url or "indeed.com" in start_url:
         # For indeed.com bare URLs, append a default PhD search
         fetch_url = start_url
@@ -199,6 +201,105 @@ async def _fetch_phdscanner_api(
             break
 
     logger.info("phdscanner API: collected %d positions", len(results))
+    return results
+
+
+# ── academicpositions.com (Livewire SPA — requires Playwright + networkidle) ──
+
+async def _fetch_academicpositions(start_url: str, max_pages: int = 3) -> List[Dict]:
+    """Scrape academicpositions.com using Playwright to execute Livewire rendering."""
+    from playwright.async_api import async_playwright
+    from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
+
+    parsed = urlparse(start_url)
+    qs = parse_qs(parsed.query)
+    # Extract search keyword and positions filter
+    search = qs.get("search", ["PHD"])[0]
+    positions = qs.get("positions[0]", ["phd"])[0]
+
+    results: List[Dict] = []
+
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        ctx = await browser.new_context(
+            viewport={"width": 1280, "height": 900},
+            user_agent=(
+                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+            ),
+        )
+        page = await ctx.new_page()
+
+        for page_num in range(1, max_pages + 1):
+            page_url = (
+                f"https://academicpositions.com/find-jobs"
+                f"?page={page_num}&search={search}&positions[0]={positions}"
+            )
+            try:
+                resp = await page.goto(page_url, wait_until="networkidle", timeout=30000)
+                if resp and resp.status in (429, 403):
+                    logger.warning("academicpositions.com rate-limited (page %d): %d", page_num, resp.status)
+                    break
+                # Wait for Livewire job cards to appear in the DOM
+                try:
+                    await page.wait_for_selector("div.job-list-item", timeout=10000)
+                except Exception:
+                    logger.warning("academicpositions.com: no job cards on page %d", page_num)
+                    break
+
+                html = await page.content()
+            except Exception as exc:
+                logger.error("academicpositions.com Playwright error page %d: %s", page_num, exc)
+                break
+
+            soup = BeautifulSoup(html, "html.parser")
+            page_results = _parse_academicpositions(soup)
+            if not page_results:
+                break
+            results.extend(page_results)
+
+        await browser.close()
+
+    logger.info("academicpositions.com: collected %d positions", len(results))
+    return results
+
+
+def _parse_academicpositions(soup: BeautifulSoup) -> List[Dict]:
+    """Parse Livewire-rendered job cards on academicpositions.com."""
+    results = []
+    for card in soup.select("div.job-list-item"):
+        slug = card.get("data-page-slug", "").strip()
+        if not slug:
+            continue
+        apply_url = f"https://academicpositions.com/academic-jobs/{slug}"
+
+        # Title: prefer h4 inside card, fall back to job-link anchor text
+        title_el = card.select_one("h4") or card.select_one("a.hover-title-underline")
+        title = title_el.get_text(strip=True) if title_el else slug.replace("-", " ").title()
+
+        # Institution: span or anchor with text-primary class
+        inst_el = card.select_one("span.text-primary, a.job-link.text-reset")
+        university = inst_el.get_text(strip=True) if inst_el else ""
+
+        # Location: text-muted anchors (city + country)
+        loc_els = card.select("a.text-muted")
+        country = " ".join(a.get_text(strip=True).rstrip(",") for a in loc_els).strip()
+
+        # Description: first p.text-muted
+        desc_el = card.select_one("p.text-muted")
+        description = desc_el.get_text(strip=True) if desc_el else ""
+
+        pos = {
+            "title":       title,
+            "university":  university,
+            "country":     country,
+            "deadline":    None,
+            "description": description,
+            "apply_url":   apply_url,
+            "raw_html":    "",
+        }
+        if _is_relevant(pos):
+            results.append(pos)
     return results
 
 
