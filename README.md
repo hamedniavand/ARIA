@@ -1,20 +1,23 @@
 # ARIA — Academic Research & Intelligence Agent
 
-An automated platform that discovers PhD and research positions from multiple job boards, scores them against applicant profiles using Gemini AI, generates tailored cover letters, and submits applications via a Playwright browser agent — all from a clean web dashboard.
+An automated platform that discovers PhD and research positions from multiple job boards and Telegram channels, scores them against applicant profiles using Gemini AI, generates tailored multi-language cover letters, and submits applications via a Playwright browser agent — all from a password-protected web dashboard.
 
 ---
 
 ## Features
 
-- **Automated scraping** — EURAXESS, jobs.ac.uk, and any custom URL; multi-page pagination support
+- **Automated scraping** — academicpositions.com (Livewire SPA), EURAXESS, jobs.ac.uk, phdscanner.com (JSON API), ae.indeed.com, Telegram public channels; multi-page pagination support
 - **AI matching** — Gemini 2.5 Flash scores each position against each applicant (field alignment, skills, research fit)
-- **Cover letter generation** — tailored academic cover letters written by Gemini, editable before approval
+- **Multi-language cover letters** — tailored academic cover letters in 18 languages, editable before approval
 - **Browser agent** — Playwright navigates to application portals, handles cookie consent, detects and fills forms, takes before/after screenshots
+- **CAPTCHA solving** — automatic reCAPTCHA v2 / hCaptcha solving via CapSolver API
 - **Multi-applicant** — manage multiple PhD applicants, each with their own documents, credentials, and match queue
 - **Document indexing** — upload CV/SOP/references; AI summarises them for better matching
 - **Portal credentials vault** — store login credentials per applicant per portal
 - **Review queue** — human-in-the-loop: review cover letter, then approve to trigger auto-submission
+- **Analytics dashboard** — pipeline funnel, match/submission rates per source and per applicant
 - **Rich dashboard** — sortable tables, applicant filter, batch operations, reliability score per source
+- **Production-ready** — systemd service, HTTP Basic Auth, log rotation
 
 ---
 
@@ -25,8 +28,9 @@ An automated platform that discovers PhD and research positions from multiple jo
 | Backend | Python 3.12 · FastAPI · SQLModel · SQLite |
 | AI | Google Gemini 2.5 Flash (via Cloudflare Worker proxy) |
 | Browser automation | Playwright (Chromium, headless) |
+| CAPTCHA solving | CapSolver API (optional) |
 | Frontend | Vanilla JS · Plain HTML/CSS (no framework) |
-| Server | Ubuntu VPS · Uvicorn |
+| Server | Ubuntu VPS · Uvicorn · systemd |
 
 ---
 
@@ -35,12 +39,12 @@ An automated platform that discovers PhD and research positions from multiple jo
 ```
 ARIA/
 ├── backend/
-│   ├── main.py                  # FastAPI app, static mounts, lifespan
+│   ├── main.py                  # FastAPI app, static mounts, lifespan, analytics endpoint
 │   ├── core/
 │   │   ├── config.py            # .env loader, all config vars
 │   │   └── database.py          # SQLite engine, init_db()
 │   ├── models/
-│   │   ├── applicant.py         # Applicant, Document
+│   │   ├── applicant.py         # Applicant (+ preferred_language), Document
 │   │   ├── source.py            # Source (job board URL)
 │   │   ├── position.py          # Position (scraped job)
 │   │   ├── application.py       # Application + ApplicationStatus enum
@@ -51,19 +55,23 @@ ARIA/
 │   │   ├── positions.py         # list/get + batch delete
 │   │   └── applications.py      # list/get/patch + approve + retry + batch status
 │   └── agent/
-│       ├── scraper.py           # Multi-site scraper (EURAXESS, jobs.ac.uk, generic)
+│       ├── scraper.py           # Multi-site scraper (EURAXESS, jobs.ac.uk, phdscanner,
+│       │                        #   academicpositions, indeed, findaphd, Telegram)
 │       ├── matcher.py           # Gemini scoring + cover letter pipeline
-│       ├── generator.py         # Gemini cover letter + document summarisation
-│       └── browser.py           # Playwright form detection + submission
-└── frontend/
-    ├── index.html               # SPA shell
-    ├── css/style.css
-    └── js/
-        ├── app.js               # API client, shared state, helpers
-        ├── sources.js           # Sources view (sort, reliability badge, scan)
-        ├── positions.js         # Positions view (applicant filter, sort, batch)
-        ├── applicants.js        # Applicants view (docs, credentials)
-        └── queue.js             # Queue, Errors, Submitted views + screenshots
+│       ├── generator.py         # Gemini cover letter (multi-language) + doc summarisation
+│       └── browser.py           # Playwright form detection + CAPTCHA solving + submission
+├── frontend/
+│   ├── index.html               # SPA shell
+│   ├── css/style.css
+│   └── js/
+│       ├── app.js               # API client, shared state, helpers
+│       ├── sources.js           # Sources view (sort, reliability badge, scan)
+│       ├── positions.js         # Positions view (applicant filter, sort, batch)
+│       ├── applicants.js        # Applicants view (docs, credentials, language)
+│       ├── queue.js             # Queue, Errors, Submitted views + screenshots
+│       └── analytics.js         # Analytics view (funnel, per-source, per-applicant)
+├── /etc/systemd/system/aria.service   # systemd unit (auto-start, auto-restart)
+└── /etc/logrotate.d/aria              # Daily log rotation, 14-day retention
 ```
 
 ---
@@ -75,6 +83,7 @@ ARIA/
 - Python 3.11+
 - A Google Gemini API key (free tier works; enable billing for higher quotas)
 - A Cloudflare Worker proxy if your server IP is geo-blocked by Google APIs (see below)
+- CapSolver API key (optional, for CAPTCHA solving)
 
 ### Install
 
@@ -103,16 +112,35 @@ BASE_URL=http://your-server:8000
 DB_PATH=/path/to/ARIA/aria.db
 UPLOADS_DIR=/path/to/ARIA/uploads
 SCREENSHOTS_DIR=/path/to/ARIA/screenshots
+DASHBOARD_USER=admin
+DASHBOARD_PASS=your-strong-password
+CAPTCHA_API_KEY=your-capsolver-key   # optional
 ```
 
-### Run
+### Run (development)
 
 ```bash
 cd ARIA/backend
 uvicorn main:app --host 0.0.0.0 --port 8000
 ```
 
-Open `http://localhost:8000` in your browser.
+Open `http://localhost:8000` in your browser and enter your dashboard credentials.
+
+### Run (production — systemd)
+
+```bash
+# Install service
+sudo cp /path/to/aria.service /etc/systemd/system/aria.service
+sudo mkdir -p /var/log/aria
+sudo systemctl daemon-reload
+sudo systemctl enable aria
+sudo systemctl start aria
+
+# Useful commands
+sudo systemctl status aria        # check status
+sudo systemctl restart aria       # restart after config changes
+sudo journalctl -u aria -f        # live logs
+```
 
 ### Gemini Proxy (optional)
 
@@ -134,12 +162,27 @@ Set `GEMINI_PROXY_URL` to your Worker URL.
 
 ## Usage
 
-1. **Add sources** — Sources → Add Source, paste a EURAXESS or jobs.ac.uk search URL
-2. **Add applicants** — Applicants → Add Applicant, fill in bio and field of study; upload CV/SOP
+1. **Add sources** — Sources → Add Source, paste a job board URL or Telegram channel link (e.g. `https://t.me/phd_positions`)
+2. **Add applicants** — Applicants → Add Applicant, fill in bio and field of study, select cover letter language; upload CV/SOP
 3. **Scan** — click Scan on a source; ARIA scrapes positions, scores them against all applicants, and generates cover letters for matches
 4. **Review queue** — Queue view; read and edit the cover letter, then click Approve & Submit
-5. **Browser agent** — ARIA opens the job portal headlessly, fills the form, takes screenshots
+5. **Browser agent** — ARIA opens the job portal headlessly, fills the form, solves CAPTCHAs if needed, takes screenshots
 6. **Track** — Submitted view shows all submitted applications with submission date and screenshots
+7. **Analytics** — Analytics view shows match rates, submission rates, and performance breakdown per source and applicant
+
+---
+
+## Supported Sources
+
+| Site | Method | Notes |
+|------|--------|-------|
+| academicpositions.com | Playwright + Livewire wait | ~10 results/page |
+| euraxess.ec.europa.eu | HTTP + two-phase scraping | Detail-page parsing |
+| jobs.ac.uk | HTTP + BeautifulSoup | |
+| phdscanner.com | JSON API (offset pagination) | ~250 results/scan |
+| ae.indeed.com | Playwright | ~10-16 results/scan |
+| t.me/{channel} | HTTP (public preview) | Any public Telegram channel |
+| findaphd.com | Playwright | Cloudflare JS challenge — may be blocked |
 
 ---
 
@@ -176,22 +219,20 @@ Set `GEMINI_PROXY_URL` to your Worker URL.
 - [x] Batch operations — delete positions, bulk status change
 - [x] Scrape reliability score per source (data completeness %)
 
-### 🔲 Phase 4 — Production Server
-- [ ] Nginx reverse proxy config
-- [ ] systemd service (`aria.service`) for auto-restart on reboot
-- [ ] HTTPS via Let's Encrypt (Certbot)
-- [ ] Basic auth on dashboard (password protection)
-- [ ] Log rotation
+### ✅ Phase 4 — Production Server
+- [x] HTTP Basic Auth on dashboard (password protection via `.env`)
+- [x] systemd service (`aria.service`) for auto-restart on reboot
+- [x] Log rotation (`/etc/logrotate.d/aria`) — daily, 14-day retention
 
-### 🔲 Phase 5 — Automation & Intelligence
+### ✅ Phase 5 — Automation & Intelligence
+- [x] More scrapers: phdscanner.com (JSON API), academicpositions.com (Livewire SPA), ae.indeed.com, Telegram public channels
+- [x] Multi-language cover letters (18 languages, per-applicant setting)
+- [x] CAPTCHA solving (CapSolver integration — reCAPTCHA v2 + hCaptcha)
+- [x] Analytics dashboard (pipeline funnel, match rate, submission rate by source and applicant)
 - [ ] Scheduled scans (cron — auto-scan active sources daily/weekly)
 - [ ] Email/Telegram notifications for new matches and submissions
-- [ ] CAPTCHA solving (2captcha / CapSolver integration)
-- [ ] More scrapers: ScholarshipDB, ResearchGate Jobs, university career portals
-- [ ] Multi-language cover letters (German, French, Dutch)
 - [ ] Duplicate position detection across sources
 - [ ] Application outcome tracking (interview invited, rejected, offer received)
-- [ ] Analytics dashboard (match rate, submission rate, response rate by source)
 
 ---
 
@@ -214,13 +255,15 @@ Set `GEMINI_PROXY_URL` to your Worker URL.
 | GET | `/api/applications/{id}/screenshots` | List submission screenshots |
 | GET | `/api/applicants` | List applicants |
 | POST | `/api/applicants` | Create applicant |
+| PATCH | `/api/applicants/{id}` | Update applicant (incl. preferred_language) |
 | POST | `/api/applicants/{id}/documents` | Upload document (CV/SOP/etc.) |
 | DELETE | `/api/applicants/{id}/documents/{doc_id}` | Delete document |
 | GET | `/api/applicants/{id}/credentials` | List portal credentials |
 | POST | `/api/applicants/{id}/credentials` | Save portal credential |
 | DELETE | `/api/applicants/{id}/credentials/{cred_id}` | Delete credential |
 | GET | `/api/stats` | Pipeline stage counts |
-| GET | `/api/health` | Health check |
+| GET | `/api/analytics` | Match/submission rates by source and applicant |
+| GET | `/api/health` | Health check (no auth required) |
 
 ---
 
