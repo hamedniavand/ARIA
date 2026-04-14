@@ -1,5 +1,6 @@
 """Scrapes academic job directory pages and stores new Positions in the DB."""
 import asyncio
+import json
 import logging
 import re
 from datetime import datetime
@@ -50,7 +51,7 @@ async def scrape_source(source_id: int) -> List[int]:
             raw = await _fetch_all_pages(client, url)
     except Exception as exc:
         logger.error("Scrape failed for source %s (%s): %s", source_id, url, exc)
-        return []
+        raw = []  # fall through so last_scraped_at is still updated below
 
     logger.info("Source %s: scraped %d candidates (before dedup)", source_id, len(raw))
 
@@ -96,6 +97,18 @@ async def _fetch_all_pages(
     client: httpx.AsyncClient, start_url: str, max_pages: int = 5
 ) -> List[Dict]:
     """Walk paginated results, preserving original query params on every page."""
+    # Dispatch to specialised fetchers before trying generic HTML
+    if "phdscanner.com" in start_url:
+        return await _fetch_phdscanner_api(client, start_url, max_pages=10)
+    if "findaphd.com" in start_url or "indeed.com" in start_url:
+        try:
+            html = await _fetch_page_playwright(start_url)
+        except Exception as exc:
+            logger.error("Playwright fetch failed for %s: %s", start_url, exc)
+            return []
+        soup = BeautifulSoup(html, "html.parser")
+        return await _parse(soup, start_url, client)
+
     results: List[Dict] = []
     current_url: Optional[str] = start_url
 
@@ -120,6 +133,93 @@ async def _fetch_all_pages(
             break
 
     return results
+
+
+# ── phdscanner.com JSON API ───────────────────────────────────────────────────
+
+async def _fetch_phdscanner_api(
+    client: httpx.AsyncClient, start_url: str, max_pages: int = 10
+) -> List[Dict]:
+    """Call the phdscanner.com undocumented REST API and return structured positions."""
+    parsed = urlparse(start_url)
+    qs = parse_qs(parsed.query)
+    keyword = qs.get("search", qs.get("Keywords", ["phd"]))[0]
+
+    api_base = "https://www.phdscanner.com/api/opportunities"
+    results: List[Dict] = []
+
+    for page in range(1, max_pages + 1):
+        try:
+            resp = await client.get(
+                api_base,
+                params={"page": page, "limit": 25, "search": keyword},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+        except Exception as exc:
+            logger.warning("phdscanner API page %d failed: %s", page, exc)
+            break
+
+        items = data.get("data", [])
+        if not items:
+            break
+
+        for item in items:
+            city    = item.get("city", "") or ""
+            country = item.get("country", "") or ""
+            location = ", ".join(filter(None, [city, country]))
+            apply_url = item.get("opportunity_url", "").strip()
+            if not apply_url:
+                continue
+            pos = {
+                "title":       item.get("title", "Unknown Title"),
+                "university":  item.get("university", ""),
+                "country":     location,
+                "deadline":    item.get("closing_date") or None,
+                "description": item.get("ai_summary", ""),
+                "apply_url":   apply_url,
+                "raw_html":    "",
+            }
+            if _is_relevant(pos):
+                results.append(pos)
+
+        pagination = data.get("pagination", {})
+        total = pagination.get("total", 0)
+        limit = pagination.get("limit", 25)
+        if page * limit >= total:
+            break
+
+    logger.info("phdscanner API: collected %d positions", len(results))
+    return results
+
+
+# ── Playwright-based page fetcher (for Cloudflare-protected sites) ────────────
+
+async def _fetch_page_playwright(url: str, timeout_ms: int = 20_000) -> str:
+    """Render a page with Playwright and return the HTML source."""
+    from playwright.async_api import async_playwright
+
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        ctx = await browser.new_context(
+            viewport={"width": 1280, "height": 800},
+            user_agent=(
+                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+            ),
+        )
+        page = await ctx.new_page()
+        try:
+            await page.goto(url, wait_until="networkidle", timeout=timeout_ms)
+            # Detect Cloudflare challenge
+            title = await page.title()
+            if "just a moment" in title.lower() or "cloudflare" in title.lower():
+                raise RuntimeError(f"Cloudflare challenge on {url}: '{title}'")
+            html = await page.content()
+        finally:
+            await browser.close()
+
+    return html
 
 
 def _merge_url(original: str, next_href: str) -> str:
@@ -150,6 +250,10 @@ async def _parse(
         return await _parse_euraxess(soup, base_url, client)
     if "jobs.ac.uk" in base_url:
         return _parse_jobs_ac_uk(soup, base_url)
+    if "findaphd.com" in base_url:
+        return _parse_findaphd(soup, base_url)
+    if "indeed.com" in base_url:
+        return _parse_indeed(soup, base_url)
     return _parse_generic(soup, base_url)
 
 
@@ -311,6 +415,83 @@ def _parse_jobs_ac_uk(soup: BeautifulSoup, base_url: str) -> List[Dict]:
         }
         if _is_relevant(item_data):
             results.append(item_data)
+    return results
+
+
+# ── findaphd.com ─────────────────────────────────────────────────────────────
+
+def _parse_findaphd(soup: BeautifulSoup, base_url: str) -> List[Dict]:
+    results = []
+    for item in soup.select("div.phd-result, article.result-item, div.ResultItem"):
+        title_el = item.select_one("h3 a, h4 a, .phd-result__title a, .ResultTitle a")
+        if not title_el:
+            continue
+        href = title_el.get("href", "")
+        if not href:
+            continue
+        if not href.startswith("http"):
+            href = urljoin("https://www.findaphd.com", href)
+
+        inst_el = item.select_one(
+            ".phd-result__dept-inst, .result-dept, .ResultInstitution, .phd-result__key-info"
+        )
+        country_el = item.select_one(".result-country, .phd-result__country")
+        deadline_el = item.select_one(".result-deadline, .phd-result__deadline, .ResultDeadline")
+
+        # Try to extract country from institution text if no dedicated element
+        inst_text = inst_el.get_text(separator=" ", strip=True) if inst_el else ""
+        country_text = country_el.get_text(strip=True) if country_el else ""
+
+        pos = {
+            "title":       title_el.get_text(strip=True),
+            "university":  inst_text,
+            "country":     country_text,
+            "deadline":    deadline_el.get_text(strip=True) if deadline_el else None,
+            "description": item.get_text(separator=" ", strip=True)[:600],
+            "apply_url":   href,
+            "raw_html":    str(item),
+        }
+        if _is_relevant(pos):
+            results.append(pos)
+    return results
+
+
+# ── indeed.com ────────────────────────────────────────────────────────────────
+
+def _parse_indeed(soup: BeautifulSoup, base_url: str) -> List[Dict]:
+    results = []
+    parsed = urlparse(base_url)
+    domain_root = f"{parsed.scheme}://{parsed.netloc}"
+
+    for item in soup.select("div.job_seen_beacon, li.css-5lfssm, div.result"):
+        title_el = item.select_one("h2.jobTitle a, h2 a[data-jk], a.jcs-JobTitle")
+        if not title_el:
+            continue
+
+        href = title_el.get("href", "")
+        jk = title_el.get("data-jk", "")
+        if jk:
+            href = f"{domain_root}/viewjob?jk={jk}"
+        elif href:
+            if not href.startswith("http"):
+                href = urljoin(domain_root, href)
+        else:
+            continue
+
+        company_el  = item.select_one(".companyName, [data-testid='company-name']")
+        location_el = item.select_one(".companyLocation, [data-testid='text-location']")
+
+        pos = {
+            "title":       title_el.get_text(strip=True),
+            "university":  company_el.get_text(strip=True) if company_el else "",
+            "country":     location_el.get_text(strip=True) if location_el else "",
+            "deadline":    None,
+            "description": item.get_text(separator=" ", strip=True)[:600],
+            "apply_url":   href,
+            "raw_html":    str(item),
+        }
+        if _is_relevant(pos):
+            results.append(pos)
     return results
 
 
