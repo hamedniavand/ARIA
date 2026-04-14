@@ -26,6 +26,7 @@ class SourceWithStats(BaseModel):
     created_at: Optional[datetime]
     position_count: int
     reliability_score: Optional[float]   # 0–100, null if never scraped
+    match_yield: Optional[float]         # % of positions with ≥1 match, null if no positions
 
 
 def _reliability(positions) -> Optional[float]:
@@ -50,12 +51,23 @@ def _reliability(positions) -> Optional[float]:
 @router.get("", response_model=List[SourceWithStats])
 def list_sources(session: Session = Depends(get_session)):
     from models.position import Position
+    from models.application import Application, ApplicationStatus
     sources = session.exec(select(Source).order_by(Source.label)).all()
     result = []
     for src in sources:
         positions = session.exec(
             select(Position).where(Position.source_id == src.id)
         ).all()
+        match_yield = None
+        if positions:
+            pos_ids = [p.id for p in positions]
+            matched_pos_ids = {
+                a.position_id for a in session.exec(
+                    select(Application).where(Application.position_id.in_(pos_ids))
+                ).all()
+                if a.status not in (ApplicationStatus.skipped, ApplicationStatus.discovered)
+            }
+            match_yield = round(len(matched_pos_ids) / len(positions) * 100, 1)
         result.append(SourceWithStats(
             id=src.id,
             url=src.url,
@@ -65,6 +77,7 @@ def list_sources(session: Session = Depends(get_session)):
             created_at=src.created_at,
             position_count=len(positions),
             reliability_score=_reliability(positions),
+            match_yield=match_yield,
         ))
     return result
 
