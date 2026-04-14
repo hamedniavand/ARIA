@@ -250,10 +250,10 @@ Set `GEMINI_PROXY_URL` to your Worker URL.
 - [ ] ScholarshipDB, ResearchGate Jobs
 - [ ] University career portals (direct scraping, autonomous method selection)
 
-### 🔲 Phase 8 — Intelligence Upgrades
-- [ ] Smarter matching — score against full CV text, not just the AI summary
-- [ ] Auto-regenerate cover letters when applicant profile is updated
-- [ ] Position quality scoring — rank sources by match yield, not just data completeness
+### ✅ Phase 8 — Intelligence Upgrades
+- [x] Smarter matching — scoring now uses full CV/SOP file text (up to 3 000 chars) alongside the AI summary, giving Gemini richer signal on skills, publications, and experience
+- [x] Auto-regenerate cover letters — updating bio / field of study / language, or uploading a new document, automatically re-generates all `ready` cover letters for that applicant
+- [x] Match yield per source — Sources table now shows "Match Yield %": fraction of positions from each source that resulted in ≥1 match, sortable column
 
 ---
 

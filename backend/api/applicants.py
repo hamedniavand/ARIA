@@ -57,20 +57,28 @@ def get_applicant(applicant_id: int, session: Session = Depends(get_session)):
     return a
 
 
+_PROFILE_FIELDS = {"bio", "field_of_study", "preferred_language"}
+
+
 @router.patch("/{applicant_id}", response_model=Applicant)
 def update_applicant(
     applicant_id: int,
     data: ApplicantUpdate,
+    background_tasks: BackgroundTasks,
     session: Session = Depends(get_session),
 ):
     a = session.get(Applicant, applicant_id)
     if not a:
         raise HTTPException(status_code=404, detail="Applicant not found")
-    for field, value in data.model_dump(exclude_none=True).items():
+    changed = data.model_dump(exclude_none=True)
+    profile_changed = bool(changed.keys() & _PROFILE_FIELDS)
+    for field, value in changed.items():
         setattr(a, field, value)
     session.add(a)
     session.commit()
     session.refresh(a)
+    if profile_changed:
+        background_tasks.add_task(_regenerate_covers_for_applicant, applicant_id)
     return a
 
 
@@ -153,12 +161,37 @@ async def _index_document(doc_id: int, file_path: str, doc_type: str) -> None:
 
     summary = await summarize_document(text, doc_type)
 
+    applicant_id = None
     with S(engine) as s:
         doc = s.get(Document, doc_id)
         if doc:
             doc.summary = summary
+            applicant_id = doc.applicant_id
             s.add(doc)
             s.commit()
+
+    if applicant_id:
+        await _regenerate_covers_for_applicant(applicant_id)
+
+
+async def _regenerate_covers_for_applicant(applicant_id: int) -> None:
+    """Re-generate cover letters for all 'ready' applications of this applicant."""
+    from core.database import engine
+    from models.application import Application, ApplicationStatus
+    from agent.matcher import prepare_application
+    from sqlmodel import Session as S, select
+
+    with S(engine) as s:
+        app_ids = [
+            a.id for a in s.exec(
+                select(Application)
+                .where(Application.applicant_id == applicant_id)
+                .where(Application.status == ApplicationStatus.ready)
+            ).all()
+        ]
+
+    for app_id in app_ids:
+        await prepare_application(app_id)
 
 
 def _extract_text(file_path: str) -> str:

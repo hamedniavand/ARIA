@@ -132,8 +132,16 @@ async def prepare_application(application_id: int) -> None:
 
 
 async def _score_match(position, applicant, docs: list) -> Tuple[float, str]:
-    cv = _doc_summary(docs, "cv")
-    sop = _doc_summary(docs, "sop")
+    cv_summary  = _doc_summary(docs, "cv")
+    sop_summary = _doc_summary(docs, "sop")
+    cv_full     = _doc_full_text(docs, "cv")
+    sop_full    = _doc_full_text(docs, "sop")
+
+    # Use full text when available (richer signal); fall back to summary only
+    cv_section  = (f"CV summary: {cv_summary[:400]}\nCV text:\n{cv_full[:2800]}"
+                   if cv_full else f"CV: {cv_summary[:600]}")
+    sop_section = (f"SOP summary: {sop_summary[:300]}\nSOP text:\n{sop_full[:1800]}"
+                   if sop_full else f"SOP: {sop_summary[:400]}")
 
     prompt = f"""You evaluate PhD application fit. Return ONLY valid JSON — no markdown, no extra text.
 
@@ -146,8 +154,8 @@ APPLICANT:
 Name: {applicant.name}
 Field: {applicant.field_of_study}
 Bio: {applicant.bio[:500]}
-CV: {cv[:600]}
-SOP: {sop[:400]}
+{cv_section}
+{sop_section}
 
 Score 0-100 (field alignment 40%, skills 30%, research interest 30%).
 JSON format: {{"score": <int>, "reason": "<one sentence>"}}"""
@@ -167,3 +175,21 @@ def _doc_summary(docs: list, doc_type: str) -> str:
         if d.doc_type == doc_type and d.summary:
             return d.summary
     return "Not provided"
+
+
+def _doc_full_text(docs: list, doc_type: str) -> str:
+    """Return raw extracted text from the first matching document file."""
+    for d in docs:
+        if d.doc_type == doc_type and getattr(d, "file_path", None):
+            try:
+                path = d.file_path
+                if path.lower().endswith(".pdf"):
+                    import pypdf
+                    with open(path, "rb") as f:
+                        reader = pypdf.PdfReader(f)
+                        return "\n".join(p.extract_text() or "" for p in reader.pages)
+                with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                    return f.read()
+            except Exception:
+                pass
+    return ""

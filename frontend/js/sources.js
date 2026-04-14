@@ -29,13 +29,14 @@ function renderSources() {
 // ── Column headers ────────────────────────────────────────────────────────────
 
 const _SRC_COLS = [
-  { key: 'label',       label: 'Label',       sortable: true },
-  { key: 'url',         label: 'URL',          sortable: false },
-  { key: 'positions',   label: 'Positions',    sortable: true,  style: 'width:90px' },
-  { key: 'reliability', label: 'Reliability',  sortable: true,  style: 'width:100px' },
-  { key: 'last_scan',   label: 'Last Scan',    sortable: true,  style: 'width:150px' },
-  { key: 'active',      label: 'Active',       sortable: true,  style: 'width:70px' },
-  { key: 'action',      label: 'Action',       sortable: false, style: 'width:180px' },
+  { key: 'label',       label: 'Label',        sortable: true },
+  { key: 'url',         label: 'URL',           sortable: false },
+  { key: 'positions',   label: 'Positions',     sortable: true,  style: 'width:90px' },
+  { key: 'reliability', label: 'Reliability',   sortable: true,  style: 'width:100px' },
+  { key: 'match_yield', label: 'Match Yield',   sortable: true,  style: 'width:100px' },
+  { key: 'last_scan',   label: 'Last Scan',     sortable: true,  style: 'width:150px' },
+  { key: 'active',      label: 'Active',        sortable: true,  style: 'width:70px' },
+  { key: 'action',      label: 'Action',        sortable: false, style: 'width:180px' },
 ];
 
 function renderSourcesHead() {
@@ -67,7 +68,7 @@ function renderSourcesTable() {
   if (!tbody) return;
 
   if (!state.sources.length) {
-    tbody.innerHTML = `<tr><td colspan="7" class="empty">No sources yet. Add one to start discovering positions.</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="8" class="empty">No sources yet. Add one to start discovering positions.</td></tr>`;
     return;
   }
 
@@ -83,6 +84,8 @@ function renderSourcesTable() {
     } else if (_srcSort.col === 'last_scan') {
       va = a.last_scraped_at ? new Date(a.last_scraped_at).getTime() : 0;
       vb = b.last_scraped_at ? new Date(b.last_scraped_at).getTime() : 0;
+    } else if (_srcSort.col === 'match_yield') {
+      va = a.match_yield ?? -1; vb = b.match_yield ?? -1;
     } else if (_srcSort.col === 'active') {
       va = a.is_active ? 0 : 1; vb = b.is_active ? 0 : 1;
     } else {
@@ -103,6 +106,9 @@ function renderSourcesTable() {
     const relHtml     = relScore == null
       ? `<span style="color:#b4b2a9;font-size:11px">—</span>`
       : reliabilityBadge(relScore);
+    const yieldHtml   = s.match_yield == null
+      ? `<span style="color:#b4b2a9;font-size:11px">—</span>`
+      : reliabilityBadge(s.match_yield);
 
     return `<tr>
       <td><strong>${escHtml(s.label)}</strong></td>
@@ -114,6 +120,7 @@ function renderSourcesTable() {
       </td>
       <td style="font-size:12px">${posCount}</td>
       <td>${relHtml}</td>
+      <td>${yieldHtml}</td>
       <td class="${isScanning ? 'scanning' : ''}" style="font-size:11px;color:#888780">
         ${isScanning ? '<span class="spin">⟳</span> Scanning…' : escHtml(lastScan)}
       </td>
