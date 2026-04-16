@@ -13,6 +13,7 @@ class Position(SQLModel, table=True):
     country: str = ""
     description: str = ""
     deadline: Optional[str] = None
+    field: str = ""              # academic discipline, e.g. "Computer Science"
     apply_url: str = ""
     raw_html: str = ""
     discovered_at: datetime = Field(default_factory=datetime.utcnow)

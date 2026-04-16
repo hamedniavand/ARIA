@@ -87,6 +87,19 @@ def get_stats():
         }
 
 
+@app.get("/api/serper-usage")
+def serper_usage():
+    """Shared Serper.dev query counter (synced with AdContact)."""
+    try:
+        import sys as _sys
+        _sys.path.insert(0, str(Path(__file__).parent.parent))
+        import serper_counter
+        used = serper_counter.read()
+    except Exception:
+        used = 0
+    return {"used": used, "limit": 2500}
+
+
 @app.get("/api/health")
 def health():
     return {"status": "ok", "version": "1.0.0"}

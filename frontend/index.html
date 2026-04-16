@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>ARIA — PhD Agent</title>
-<link rel="stylesheet" href="/css/style.css">
+<link rel="stylesheet" href="/css/style.css?v=20260416c">
 </head>
 <body>
 
@@ -63,6 +63,13 @@
         <div class="stat-n red" id="stat-errors">—</div>
         <div class="stat-l">Errors</div>
       </div>
+      <div class="stat" id="stat-serper-wrap" title="Serper.dev shared quota — used by ARIA + AdContact">
+        <div class="stat-n" id="stat-serper-n">—</div>
+        <div class="stat-l">Serper Queries</div>
+        <div style="margin-top:4px;height:3px;background:#e4e2d8;border-radius:2px;overflow:hidden">
+          <div id="stat-serper-bar" style="height:100%;background:#3b6d11;width:0%;transition:width .4s"></div>
+        </div>
+      </div>
     </div>
 
     <!-- Views -->
@@ -79,11 +86,11 @@
 
 <div id="toast" class="toast"></div>
 
-<script src="/js/app.js"></script>
-<script src="/js/queue.js"></script>
-<script src="/js/positions.js"></script>
-<script src="/js/applicants.js"></script>
-<script src="/js/sources.js"></script>
-<script src="/js/analytics.js"></script>
+<script src="/js/app.js?v=20260416c"></script>
+<script src="/js/queue.js?v=20260416c"></script>
+<script src="/js/positions.js?v=20260416c"></script>
+<script src="/js/applicants.js?v=20260416c"></script>
+<script src="/js/sources.js?v=20260416c"></script>
+<script src="/js/analytics.js?v=20260416c"></script>
 </body>
 </html>

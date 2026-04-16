@@ -211,6 +211,21 @@ td { padding: 9px 12px; font-size: 12px; vertical-align: middle; }
 .b-error     { background: #fcebeb; color: #a32d2d; }
 .b-skipped   { background: #f1efe8; color: #888780; }
 
+/* ── Field badge ──────────────────────────────────────────────────────────── */
+.badge-field {
+  display: inline-block;
+  padding: 2px 7px;
+  border-radius: 10px;
+  font-size: 10px;
+  font-weight: 500;
+  background: #eeedfe;
+  color: #534ab7;
+  white-space: nowrap;
+  max-width: 130px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 /* ── Match bar ────────────────────────────────────────────────────────────── */
 .match-bar { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
 .bar-bg {

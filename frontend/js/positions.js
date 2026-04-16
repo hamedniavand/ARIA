@@ -23,6 +23,7 @@ function renderPositions() {
     <div class="topbar-right">
       <span class="ts">${lastScan}</span>
       <button class="btn" onclick="navigate('sources')">Scan Now</button>
+      <button class="btn" onclick="rematchAll()" id="rematch-btn">⟳ Rematch All</button>
       <button class="btn" onclick="refreshView('positions')">↺ Refresh</button>
     </div>
   </div>
@@ -115,6 +116,8 @@ function setPosSearch(q) { _posSearch = q; _posSelected.clear(); renderPosTable(
 const _POS_COLS = [
   { key: 'select',  label: '<input type="checkbox" id="pos-select-all" onchange="toggleSelectAll(this)" title="Select all">', sortable: false, style: 'width:34px' },
   { key: 'title',   label: 'Position',    sortable: true, style: 'min-width:200px' },
+  { key: 'field',   label: 'Field',       sortable: true, style: 'width:140px' },
+  { key: 'country', label: 'Country',     sortable: true, style: 'width:100px' },
   { key: 'appl',    label: 'Applicant',   sortable: false },
   { key: 'score',   label: 'Match',       sortable: true, style: 'width:90px' },
   { key: 'deadline',label: 'Deadline',    sortable: true, style: 'width:90px' },
@@ -210,6 +213,12 @@ function renderPosTable() {
     } else if (_posSort.col === 'title') {
       va = a.title.toLowerCase();
       vb = b.title.toLowerCase();
+    } else if (_posSort.col === 'field') {
+      va = (a.field || 'Other').toLowerCase();
+      vb = (b.field || 'Other').toLowerCase();
+    } else if (_posSort.col === 'country') {
+      va = (a.country || '').toLowerCase();
+      vb = (b.country || '').toLowerCase();
     } else {
       va = vb = 0;
     }
@@ -221,7 +230,7 @@ function renderPosTable() {
   });
 
   if (!positions.length) {
-    tbody.innerHTML = `<tr><td colspan="7" class="empty">No positions match the current filter.</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="9" class="empty">No positions match the current filter.</td></tr>`;
     return;
   }
 
@@ -253,13 +262,18 @@ function renderPosTable() {
 
     const errMsg = hasError ? (viewApps.find(a => a.status === 'error')?.error_message || '') : '';
 
+    const fieldLabel = pos.field || '—';
+    const countryLabel = pos.country || '—';
+
     return `<tr${hasError ? ' class="error-row"' : ''}>
       <td><input type="checkbox" ${checked} onchange="togglePosSelect(${pos.id},this.checked)"></td>
       <td>
         <div class="td-title">${escHtml(pos.title)}</div>
-        <div class="td-sub">${escHtml([pos.university, pos.country].filter(Boolean).join(' · '))}</div>
+        <div class="td-sub">${escHtml(pos.university || '')}</div>
         ${errMsg ? `<div class="td-err">⚠ ${escHtml(errMsg.slice(0, 80))}…</div>` : ''}
       </td>
+      <td><span class="badge badge-field" title="${escHtml(fieldLabel)}">${escHtml(fieldLabel)}</span></td>
+      <td style="font-size:12px;color:#555">${escHtml(countryLabel)}</td>
       <td>${applicantsHtml}</td>
       <td>${topApp ? matchBar(topApp.match_score) : '<span style="color:#b4b2a9">—</span>'}</td>
       <td>${deadlineHtml(pos.deadline)}</td>
@@ -384,4 +398,30 @@ async function retryPosErrors(posId) {
   toast(`Retrying ${errs.length} application(s)…`);
   await loadAll();
   renderPosTable();
+}
+
+async function rematchAll() {
+  const total = state.positions.length;
+  if (!total) { toast('No positions to rematch', 'error'); return; }
+  if (!confirm(`Re-run matching for all ${total} positions?\n\nThis will clear existing match results and re-score against all applicants. It may take a few minutes.`)) return;
+  const btn = document.getElementById('rematch-btn');
+  if (btn) { btn.disabled = true; btn.textContent = '⟳ Rematching…'; }
+  try {
+    const r = await api.post('/positions/rematch', {});
+    toast(`Rematch started for ${r.queued} positions — results will appear shortly`);
+    // Poll until applications start appearing
+    let polls = 0;
+    const poll = setInterval(async () => {
+      polls++;
+      await loadAll();
+      renderPosTable();
+      if (state.applications.length > 0 || polls > 30) {
+        clearInterval(poll);
+        if (btn) { btn.disabled = false; btn.textContent = '⟳ Rematch All'; }
+      }
+    }, 5000);
+  } catch(e) {
+    toast('Rematch failed: ' + e.message, 'error');
+    if (btn) { btn.disabled = false; btn.textContent = '⟳ Rematch All'; }
+  }
 }
