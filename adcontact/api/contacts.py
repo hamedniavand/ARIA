@@ -29,20 +29,23 @@ def _last_midnight_gst() -> datetime:
 @router.get("", response_model=List[Contact])
 def list_contacts(
     niche: Optional[str] = Query(None),
-    has_ads: Optional[bool] = Query(None),
+    ads_txt: Optional[bool] = Query(None),   # None = only valid (default), False = show all
     traffic: Optional[str] = Query(None),
     email_type: Optional[str] = Query(None),
     contacted: Optional[bool] = Query(None),
+    all_contacts: Optional[bool] = Query(False),
     session: Session = Depends(get_session),
 ):
     cutoff = _last_midnight_gst()
     q = select(Contact).where(Contact.discovered_at >= cutoff).order_by(Contact.discovered_at.desc())
     results = session.exec(q).all()
 
+    # Default: only show contacts with verified ads.txt (can be overridden with all_contacts=true)
+    if not all_contacts:
+        results = [c for c in results if c.ads_txt_valid]
+
     if niche:
         results = [c for c in results if niche.lower() in c.niche.lower()]
-    if has_ads is not None:
-        results = [c for c in results if c.has_ads == has_ads]
     if traffic:
         results = [c for c in results if c.traffic_guess == traffic]
     if email_type:
@@ -77,8 +80,8 @@ def toggle_contacted(contact_id: int, session: Session = Depends(get_session)):
 @router.get("/export/csv")
 def export_csv(
     niche: Optional[str] = Query(None),
-    has_ads: Optional[bool] = Query(None),
     traffic: Optional[str] = Query(None),
+    all_contacts: Optional[bool] = Query(False),
     session: Session = Depends(get_session),
 ):
     cutoff = _last_midnight_gst()
@@ -87,21 +90,21 @@ def export_csv(
         .where(Contact.discovered_at >= cutoff)
         .order_by(Contact.discovered_at.desc())
     ).all()
+    if not all_contacts:
+        results = [c for c in results if c.ads_txt_valid]
     if niche:
         results = [c for c in results if niche.lower() in c.niche.lower()]
-    if has_ads is not None:
-        results = [c for c in results if c.has_ads == has_ads]
     if traffic:
         results = [c for c in results if c.traffic_guess == traffic]
 
     output = io.StringIO()
     writer = csv.writer(output)
     writer.writerow(["website_url", "email", "email_type", "niche",
-                     "traffic_guess", "has_ads", "discovered_at", "notes", "contacted"])
+                     "traffic_guess", "ads_txt", "discovered_at", "notes", "contacted"])
     for c in results:
         writer.writerow([
             c.website_url, c.email, c.email_type, c.niche,
-            c.traffic_guess, c.has_ads,
+            c.traffic_guess, c.ads_txt_valid,
             c.discovered_at.strftime("%Y-%m-%d %H:%M UTC") if c.discovered_at else "",
             c.notes, c.contacted,
         ])

@@ -34,6 +34,7 @@ class Contact(SQLModel, table=True):
     job_id: int = Field(foreign_key="scrape_job.id")
     is_accessible: bool = True
     has_ads: bool = False
+    ads_txt_valid: bool = False
     traffic_guess: str = "low"              # low | medium | high
     discovered_at: datetime = Field(default_factory=datetime.utcnow)
     notes: str = ""

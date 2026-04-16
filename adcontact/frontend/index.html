@@ -66,8 +66,8 @@ tr.selected td{background:#f0f7e8}
 .b-high{background:#eaf4e0;color:#3b6d11}
 .b-medium{background:#fdf3dc;color:#7c5a08}
 .b-low{background:#f5f4f0;color:#888780}
-.b-ads{background:#fde8e8;color:#8b1e1e}
-.b-noads{background:#f5f4f0;color:#888780}
+.b-adstxt{background:#eaf4e0;color:#3b6d11}
+.b-noadstxt{background:#f5f4f0;color:#aaa8a0}
 .b-advertise{background:#e8f0fd;color:#1a4fa0}
 .b-contact{background:#f5f4f0;color:#555}
 .b-marketing{background:#f0e8fd;color:#6a1a9a}
@@ -144,11 +144,10 @@ input[type=checkbox]{width:15px;height:15px;cursor:pointer;accent-color:#3b6d11}
       <option value="medium">Medium</option>
       <option value="low">Low</option>
     </select>
-    <select id="f-ads" onchange="applyFilters()">
-      <option value="">Has Ads: All</option>
-      <option value="true">Yes</option>
-      <option value="false">No</option>
-    </select>
+    <label style="display:flex;align-items:center;gap:5px;font-size:12px;color:#555;cursor:pointer;user-select:none">
+      <input type="checkbox" id="f-all" onchange="applyFilters()" style="width:14px;height:14px">
+      Show all (incl. no ads.txt)
+    </label>
     <select id="f-type" onchange="applyFilters()">
       <option value="">All Types</option>
       <option value="advertise">Advertise</option>
@@ -177,7 +176,7 @@ input[type=checkbox]{width:15px;height:15px;cursor:pointer;accent-color:#3b6d11}
           <th class="sortable" data-col="email_type" onclick="setSort('email_type')">Type</th>
           <th class="sortable" data-col="niche" onclick="setSort('niche')">Niche</th>
           <th class="sortable" data-col="traffic_guess" onclick="setSort('traffic_guess')">Traffic</th>
-          <th class="sortable" data-col="has_ads" onclick="setSort('has_ads')">Has Ads</th>
+          <th class="sortable" data-col="ads_txt_valid" onclick="setSort('ads_txt_valid')" title="Site has a valid /ads.txt — confirms they run programmatic ads">ads.txt ✓</th>
           <th class="sortable" data-col="discovered_at" onclick="setSort('discovered_at')">Date Found</th>
           <th>Notes</th>
           <th>Actions</th>
@@ -242,7 +241,7 @@ function esc(s) {
 async function loadAll() {
   try {
     const [contacts, jobs, stats] = await Promise.all([
-      api.get('/contacts'),
+      api.get('/contacts?all_contacts=true'),
       api.get('/jobs'),
       api.get('/contacts/stats'),
     ]);
@@ -285,7 +284,7 @@ function sortedContacts(contacts) {
     let va = a[sortCol], vb = b[sortCol];
     if (sortCol === 'traffic_guess') {
       va = TRAFFIC_ORDER[va] ?? 0; vb = TRAFFIC_ORDER[vb] ?? 0;
-    } else if (sortCol === 'has_ads') {
+    } else if (sortCol === 'ads_txt_valid') {
       va = va ? 1 : 0; vb = vb ? 1 : 0;
     } else if (sortCol === 'discovered_at') {
       va = new Date(va || 0).getTime(); vb = new Date(vb || 0).getTime();
@@ -315,7 +314,7 @@ function renderContacts(contacts) {
     const isSelected = selectedIds.has(c.id);
     const date = c.discovered_at ? new Date(c.discovered_at).toLocaleDateString() : '—';
     const trafficBadge = `<span class="badge b-${c.traffic_guess}">${c.traffic_guess}</span>`;
-    const adsBadge = c.has_ads ? `<span class="badge b-ads">Yes</span>` : `<span class="badge b-noads">No</span>`;
+    const adsBadge = c.ads_txt_valid ? `<span class="badge b-adstxt">ads.txt ✓</span>` : `<span class="badge b-noadstxt">—</span>`;
     const typeBadge = `<span class="badge b-${esc(c.email_type)}">${esc(c.email_type)}</span>`;
     return `<tr class="${isSelected ? 'selected' : ''}" onclick="rowClick(event,${c.id})">
       <td onclick="event.stopPropagation()">
@@ -390,28 +389,30 @@ function updateSelectionUI() {
 
 // ── Filters ───────────────────────────────────────────────────────────────────
 function applyFilters() {
-  const niche    = document.getElementById('f-niche').value.toLowerCase();
-  const traffic  = document.getElementById('f-traffic').value;
-  const ads      = document.getElementById('f-ads').value;
-  const type     = document.getElementById('f-type').value;
+  const niche     = document.getElementById('f-niche').value.toLowerCase();
+  const traffic   = document.getElementById('f-traffic').value;
+  const type      = document.getElementById('f-type').value;
   const contacted = document.getElementById('f-contacted').value;
+  const showAll   = document.getElementById('f-all').checked;
 
   let filtered = allContacts;
-  if (niche)      filtered = filtered.filter(c => c.niche.toLowerCase().includes(niche) || c.website_url.includes(niche));
-  if (traffic)    filtered = filtered.filter(c => c.traffic_guess === traffic);
-  if (ads !== '') filtered = filtered.filter(c => String(c.has_ads) === ads);
-  if (type)       filtered = filtered.filter(c => c.email_type === type);
+  // Default: only ads.txt-validated sites
+  if (!showAll) filtered = filtered.filter(c => c.ads_txt_valid);
+  if (niche)    filtered = filtered.filter(c => c.niche.toLowerCase().includes(niche) || c.website_url.includes(niche));
+  if (traffic)  filtered = filtered.filter(c => c.traffic_guess === traffic);
+  if (type)     filtered = filtered.filter(c => c.email_type === type);
   if (contacted !== '') filtered = filtered.filter(c => String(c.contacted) === contacted);
 
   renderContacts(filtered);
 }
 
 function clearFilters() {
-  ['f-traffic','f-ads','f-type','f-contacted'].forEach(id => {
+  ['f-traffic','f-type','f-contacted'].forEach(id => {
     document.getElementById(id).selectedIndex = 0;
   });
   document.getElementById('f-niche').value = '';
-  renderContacts(allContacts);
+  document.getElementById('f-all').checked = false;
+  applyFilters();
 }
 
 // ── Jobs ──────────────────────────────────────────────────────────────────────

@@ -110,6 +110,27 @@ def _extract_emails(html: str) -> List[str]:
     return list(dict.fromkeys(cleaned))   # deduplicate, preserve order
 
 
+async def _check_ads_txt(client: httpx.AsyncClient, domain: str) -> bool:
+    """Return True if /ads.txt exists and contains actual ad declarations."""
+    for scheme in ("https", "http"):
+        try:
+            resp = await client.get(
+                f"{scheme}://{domain}/ads.txt",
+                headers=HEADERS, timeout=8, follow_redirects=True,
+            )
+            if resp.status_code == 200:
+                text = resp.text.strip()
+                # Must have content and at least one valid ads.txt line
+                # A valid line looks like: "google.com, pub-XXXXXXXX, DIRECT, f08c47fec0942fa0"
+                lines = [l.strip() for l in text.splitlines()
+                         if l.strip() and not l.strip().startswith("#")]
+                if lines:
+                    return True
+        except Exception:
+            pass
+    return False
+
+
 async def parse_site(url: str) -> Optional[dict]:
     """
     Visit a website and return a contact dict or None if nothing useful found.
@@ -150,6 +171,11 @@ async def parse_site(url: str) -> Optional[dict]:
 
         homepage_html, final_url = result
         soup_home = BeautifulSoup(homepage_html, "html.parser")
+
+        ads_txt_valid = await _check_ads_txt(client, domain)
+        if not ads_txt_valid:
+            logger.debug("No valid ads.txt: %s — skipping", domain)
+            return None
 
         has_ads = detect_ads(homepage_html)
         traffic = guess_traffic(homepage_html, soup_home)
@@ -196,6 +222,7 @@ async def parse_site(url: str) -> Optional[dict]:
         "email_type": email_type,
         "is_accessible": True,
         "has_ads": has_ads,
+        "ads_txt_valid": True,
         "traffic_guess": traffic,
         "notes": "; ".join(notes_parts),
     }
