@@ -114,12 +114,13 @@ function toast(msg, type = '') {
 // ── Data loading ──────────────────────────────────────────────────────────────
 async function loadAll() {
   try {
-    const [applicants, positions, applications, sources, stats] = await Promise.all([
+    const [applicants, positions, applications, sources, stats, serper] = await Promise.all([
       api.get('/applicants'),
       api.get('/positions'),
       api.get('/applications'),
       api.get('/sources'),
       api.get('/stats'),
+      api.get('/serper-usage').catch(() => ({ used: 0, limit: 2500 })),
     ]);
     state.applicants   = applicants   || [];
     state.positions    = positions    || [];
@@ -127,6 +128,7 @@ async function loadAll() {
     state.sources      = sources      || [];
     state.stats        = stats        || {};
     renderStats(stats);
+    renderSerperBadge(serper);
     updateNavBadges(stats);
   } catch (e) {
     toast('Failed to load data: ' + e.message, 'error');
@@ -139,6 +141,19 @@ function renderStats(s = {}) {
   document.getElementById('stat-ready').textContent      = s.ready      ?? '—';
   document.getElementById('stat-submitted').textContent  = s.submitted  ?? '—';
   document.getElementById('stat-errors').textContent     = s.errors     ?? '—';
+}
+
+function renderSerperBadge(s = {}) {
+  const used  = s.used  ?? 0;
+  const limit = s.limit ?? 2500;
+  const pct   = Math.min(100, (used / limit) * 100).toFixed(1);
+  const el    = document.getElementById('stat-serper-n');
+  const bar   = document.getElementById('stat-serper-bar');
+  if (el)  el.textContent = `${used} / ${limit}`;
+  if (bar) {
+    bar.style.width = pct + '%';
+    bar.style.background = used >= limit * 0.9 ? '#a32d2d' : used >= limit * 0.7 ? '#ef9f27' : '#3b6d11';
+  }
 }
 
 function updateNavBadges(s = {}) {

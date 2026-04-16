@@ -17,6 +17,8 @@ DB_PATH: str = os.getenv("DB_PATH", "/root/ARIA/aria.db")
 UPLOADS_DIR: str = os.getenv("UPLOADS_DIR", "/root/ARIA/uploads")
 DASHBOARD_USER: str = os.getenv("DASHBOARD_USER", "admin")
 DASHBOARD_PASS: str = os.getenv("DASHBOARD_PASS", "changeme")
+SERPER_API_KEY: str = os.getenv("SERPER_API_KEY", "")
+SERPER_LIMIT: int = 2500
 
 os.makedirs(SCREENSHOTS_DIR, exist_ok=True)
 os.makedirs(UPLOADS_DIR, exist_ok=True)

@@ -26,6 +26,67 @@ HEADERS = {
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
 }
 
+# ── Field classifier ─────────────────────────────────────────────────────────
+
+_FIELD_MAP = {
+    "Computer Science":      ["computer science", "machine learning", "deep learning", "nlp",
+                              "natural language", "artificial intelligence", " ai ", "software",
+                              "data science", "cybersecurity", "network", "algorithm", "computing",
+                              "information technology", "human-computer"],
+    "Biology":               ["biology", "biolog", "biochemi", "microbio", "cell biology",
+                              "molecular biology", "genetics", "genomics", "ecology",
+                              "evolution", "neuroscience", "bioinformatics", "botany", "zoology"],
+    "Chemistry":             ["chemi", "organic chemistry", "inorganic", "materials science",
+                              "polymer", "spectroscopy", "catalysis", "synthesis"],
+    "Physics":               ["physic", "quantum", "optics", "astrophysics", "condensed matter",
+                              "plasma", "particle physics", "photonics", "nuclear"],
+    "Engineering":           ["engineering", "mechanical", "electrical", "civil", "aerospace",
+                              "robotics", "embedded", "control systems", "biomedical engineering",
+                              "chemical engineering", "structural", "manufacturing"],
+    "Mathematics":           ["mathemat", "statistics", "probability", "algebra",
+                              "topology", "computational math", "numerical analysis", "stochastic"],
+    "Medicine & Health":     ["medicine", "medical", "clinical", "pharmacology", "immunology",
+                              "epidemiology", "public health", "nursing", "oncology", "pathology",
+                              "neurology", "psychiatry", "dentistry", "surgery", "radiology"],
+    "Environmental Science": ["environmental", "climate", "sustainability", "energy",
+                              "atmospheric", "geoscience", "oceanography", "hydrology",
+                              "geologi", "earth science", "remote sensing"],
+    "Economics & Business":  ["economics", "business", "finance", "management", "marketing",
+                              "accounting", "supply chain", "operations research", "econom"],
+    "Social Sciences":       ["psychology", "sociology", "political science", "anthropology",
+                              "education", "linguistics", "communication", "social work",
+                              "international relations", "criminology", "gender studies"],
+    "Humanities":            ["history", "philosophy", "literature", "archaeology",
+                              "cultural studies", "languages", "law", "theology",
+                              "art history", "musicology", "classics"],
+}
+
+def _classify_field(title: str, description: str) -> str:
+    """Return the best-matching academic discipline label for a position."""
+    text = (title + " " + description).lower()
+    best_label, best_hits = "Other", 0
+    for label, keywords in _FIELD_MAP.items():
+        hits = sum(1 for kw in keywords if kw in text)
+        if hits > best_hits:
+            best_label, best_hits = label, hits
+    return best_label
+
+
+# ── Deadline regex patterns ───────────────────────────────────────────────────
+
+_DEADLINE_PATTERNS = [
+    re.compile(
+        r'(?:application\s+deadline|closing\s+date|apply\s+by|deadline\s*:?|closes?[:\s])'
+        r'\s*([A-Za-z0-9 ,\-\/\.]+?\d{4})',
+        re.I
+    ),
+    re.compile(
+        r'(?:deadline|closing)[:\s]+(\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4})',
+        re.I
+    ),
+]
+
+
 # Only keep positions whose title/description contains one of these
 RELEVANCE_KEYWORDS = {
     "phd", "doctorate", "doctoral", "postdoc", "post-doc",
@@ -44,11 +105,20 @@ async def scrape_source(source_id: int) -> List[int]:
             return []
         url = source.url
 
+    raw: List[Dict] = []
     try:
         async with httpx.AsyncClient(
             headers=HEADERS, follow_redirects=True, timeout=30
         ) as client:
             raw = await _fetch_all_pages(client, url)
+
+            # Post-fetch: fill in missing deadlines by visiting individual pages
+            for item in raw:
+                if not item.get("deadline") and item.get("apply_url"):
+                    dl = await _fetch_deadline_from_url(client, item["apply_url"])
+                    if dl:
+                        item["deadline"] = dl
+                        logger.debug("Deadline fetched for %s: %s", item["apply_url"][:60], dl)
     except Exception as exc:
         logger.error("Scrape failed for source %s (%s): %s", source_id, url, exc)
         raw = []  # fall through so last_scraped_at is still updated below
@@ -77,6 +147,7 @@ async def scrape_source(source_id: int) -> List[int]:
                 country=item.get("country", "")[:100],
                 description=item.get("description", ""),
                 deadline=item.get("deadline"),
+                field=_classify_field(item.get("title", ""), item.get("description", "")),
                 apply_url=apply_url,
                 raw_html=item.get("raw_html", "")[:8000],
             )
@@ -110,8 +181,20 @@ async def _fetch_all_pages(
         return await _fetch_phdscanner_api(client, start_url, max_pages=10)
     if "academicpositions.com" in start_url:
         return await _fetch_academicpositions(start_url, max_pages=3)
+    # findaphd.com: Cloudflare blocks direct scraping and RSS → use Serper snippets
     if "findaphd.com" in start_url:
-        return await _fetch_findaphd(start_url, max_pages=5)
+        logger.info("findaphd.com → using Serper search (Cloudflare-blocked)")
+        return await _fetch_via_serper_snippets(
+            queries=[
+                "site:findaphd.com/phds/project phd studentship funded",
+                "site:findaphd.com/phds/project funded phd fully 2026",
+                "site:findaphd.com/phds/program phd studentship 2026",
+            ]
+        )
+    # jobs.ac.uk: RSS returns HTML, direct HTML selectors are fragile → Serper + page fetch
+    if "jobs.ac.uk" in start_url:
+        logger.info("jobs.ac.uk → using Serper + individual page parse")
+        return await _fetch_jobs_ac_uk_via_serper(client)
     if "indeed.com" in start_url:
         fetch_url = start_url
         if not parse_qs(urlparse(start_url).query).get("q"):
@@ -940,6 +1023,47 @@ async def _fetch_findaphd(start_url: str, max_pages: int = 5) -> List[Dict]:
     return results
 
 
+# ── Deadline page fetcher ─────────────────────────────────────────────────────
+
+async def _fetch_deadline_from_url(client: httpx.AsyncClient, apply_url: str) -> Optional[str]:
+    """Fetch an individual job page and extract a deadline/closing-date string.
+    Tries regex first; falls back to a short Gemini prompt if nothing found."""
+    try:
+        resp = await client.get(apply_url, timeout=10, follow_redirects=True)
+        if resp.status_code != 200:
+            return None
+        page_text = resp.text[:25000]  # only first 25 KB
+
+        # 1. Fast regex pass
+        for pat in _DEADLINE_PATTERNS:
+            m = pat.search(page_text)
+            if m:
+                raw = m.group(1).strip()[:80]
+                raw = re.sub(r'\s{2,}', ' ', raw).strip(" .,;")
+                if raw:
+                    return raw
+
+        # 2. Gemini fallback — only if page has meaningful content
+        visible_text = BeautifulSoup(page_text, "html.parser").get_text(separator=" ", strip=True)[:3000]
+        if len(visible_text) < 100:
+            return None
+
+        from agent.matcher import _gemini
+        prompt = (
+            "Read the following job posting text and extract ONLY the application deadline or closing date. "
+            "Reply with just the date (e.g. '31 January 2026' or '2026-03-15'). "
+            "If no deadline is mentioned, reply with the single word: none\n\n"
+            f"{visible_text}"
+        )
+        result = await _gemini(prompt)
+        result = result.strip().strip("'\"").strip()
+        if result.lower() not in ("none", "n/a", "", "not mentioned", "no deadline"):
+            return result[:80]
+    except Exception as exc:
+        logger.debug("Deadline fetch error %s: %s", apply_url[:60], exc)
+    return None
+
+
 # ── Duplicate detection ───────────────────────────────────────────────────────
 
 def _is_duplicate(session, title: str, university: str) -> bool:
@@ -959,6 +1083,195 @@ def _is_duplicate(session, title: str, university: str) -> bool:
         if _norm(p.title) == nt and _norm(p.university) == nu:
             return True
     return False
+
+
+# ── Serper-based scrapers ─────────────────────────────────────────────────────
+
+_SERPER_API_KEY: str = ""   # lazy-loaded from config on first call
+
+
+def _get_serper_key() -> str:
+    global _SERPER_API_KEY
+    if not _SERPER_API_KEY:
+        from core.config import SERPER_API_KEY
+        _SERPER_API_KEY = SERPER_API_KEY
+    return _SERPER_API_KEY
+
+
+async def _serper_search(queries: List[str], n: int = 10) -> List[dict]:
+    """Run Serper.dev searches and return deduplicated organic results."""
+    key = _get_serper_key()
+    if not key:
+        logger.warning("SERPER_API_KEY not set — skipping Serper search")
+        return []
+
+    seen_urls: set = set()
+    results: List[dict] = []
+
+    async with httpx.AsyncClient(timeout=15) as client:
+        for query in queries:
+            try:
+                resp = await client.post(
+                    "https://google.serper.dev/search",
+                    json={"q": query, "num": n},
+                    headers={"X-API-KEY": key, "Content-Type": "application/json"},
+                )
+                if resp.status_code != 200:
+                    logger.warning("Serper %d for query: %s", resp.status_code, query[:60])
+                    continue
+                data = resp.json()
+                # Track usage in shared counter
+                try:
+                    import sys as _sys, os as _os
+                    _sys.path.insert(0, _os.path.join(_os.path.dirname(__file__), "../../"))
+                    import serper_counter
+                    serper_counter.increment()
+                except Exception:
+                    pass
+                for item in data.get("organic", []):
+                    url = item.get("link", "")
+                    if url and url not in seen_urls:
+                        seen_urls.add(url)
+                        results.append(item)
+            except Exception as exc:
+                logger.warning("Serper error: %s", exc)
+            await asyncio.sleep(0.3)
+
+    logger.info("Serper: %d unique results from %d queries", len(results), len(queries))
+    return results
+
+
+async def _fetch_via_serper_snippets(queries: List[str]) -> List[Dict]:
+    """Use Serper snippets directly as position data (for sites blocking direct fetch).
+    Works for findaphd.com where individual pages are 403."""
+    organic = await _serper_search(queries, n=10)
+    results = []
+    for item in organic:
+        url   = item.get("link", "")
+        title = item.get("title", "").replace(" - FindAPhD.com", "").replace(" | FindAPhD", "").strip()
+        snip  = item.get("snippet", "")
+
+        # Only keep individual project/program pages (not listing/search pages)
+        if not any(seg in url for seg in ["/project/", "/program/"]):
+            continue
+        # Skip guide/news/search pages
+        if any(seg in url for seg in ["Keywords=", "/guides/", "/news/", "?g0", "?10M"]):
+            continue
+
+        # Extract university from title: "PhD in X at University Name" or snippet
+        university = ""
+        m = re.search(r'\bat\s+((?:[A-Z][a-z]+\s*){1,6})(?:[\|\-,]|$)', title)
+        if m:
+            university = m.group(1).strip()
+        if not university:
+            # Try snippet
+            ms = re.search(r'\bat\s+((?:[A-Z][a-z]+\s*){1,6})(?:[\|\-,\.])', snip)
+            if ms:
+                university = ms.group(1).strip()
+
+        pos = {
+            "title": title[:500],
+            "university": university[:300],
+            "country": "",
+            "deadline": None,
+            "description": snip[:1000],
+            "apply_url": url,
+            "raw_html": "",
+        }
+        if _is_relevant(pos):
+            results.append(pos)
+
+    logger.info("findaphd Serper snippets: %d positions", len(results))
+    return results
+
+
+async def _fetch_jobs_ac_uk_via_serper(client: httpx.AsyncClient) -> List[Dict]:
+    """Discover jobs.ac.uk individual job pages via Serper, then scrape each one."""
+    queries = [
+        "site:jobs.ac.uk/job phd studentship 2026",
+        "site:jobs.ac.uk/job phd studentship funded",
+        "site:jobs.ac.uk/job doctoral fellowship 2026",
+    ]
+    organic = await _serper_search(queries, n=10)
+
+    # Filter to individual job pages only
+    job_urls = []
+    seen: set = set()
+    for item in organic:
+        url = item.get("link", "")
+        # Individual job pages: /job/JOBID/slug
+        if re.search(r"jobs\.ac\.uk/job/[A-Z0-9]+/", url) and url not in seen:
+            seen.add(url)
+            job_urls.append(url)
+
+    logger.info("jobs.ac.uk: %d individual job URLs from Serper", len(job_urls))
+    results = []
+
+    for url in job_urls:
+        try:
+            resp = await client.get(url, timeout=12, follow_redirects=True)
+            if resp.status_code != 200:
+                continue
+            soup = BeautifulSoup(resp.text, "html.parser")
+
+            # Title
+            h1 = soup.find("h1")
+            title = h1.get_text(strip=True) if h1 else ""
+            if not title:
+                continue
+
+            # University: from title "... at University" or meta og:title
+            university = ""
+            m = re.search(r'\bat\s+(.+?)$', title, re.I)
+            if m:
+                university = m.group(1).strip()
+                title = title[:m.start()].strip()
+            if not university:
+                og = soup.find("meta", property="og:title")
+                if og:
+                    m2 = re.search(r'\bat\s+(.+?)$', og.get("content", ""), re.I)
+                    if m2:
+                        university = m2.group(1).strip()
+
+            # Country: jobs.ac.uk is UK-based
+            country = "United Kingdom"
+
+            # Deadline: "Closes:" table header → next sibling
+            deadline = None
+            for th in soup.find_all("th", class_="j-advert-details__table-header"):
+                if "closes" in th.get_text(strip=True).lower():
+                    td = th.find_next_sibling()
+                    if td:
+                        deadline = td.get_text(strip=True)
+                    break
+
+            # Description: biggest text div (row-8 is common, fall back to og:description)
+            desc_el = soup.select_one(".row-8, .j-advert__body, [itemprop=description]")
+            if desc_el:
+                description = desc_el.get_text(" ", strip=True)[:1500]
+            else:
+                og_desc = soup.find("meta", attrs={"name": "description"})
+                description = og_desc.get("content", "") if og_desc else ""
+
+            pos = {
+                "title": title[:500],
+                "university": university[:300],
+                "country": country,
+                "deadline": deadline,
+                "description": description,
+                "apply_url": url,
+                "raw_html": "",
+            }
+            if _is_relevant(pos):
+                results.append(pos)
+                logger.debug("jobs.ac.uk: %s @ %s (deadline: %s)", title[:50], university[:40], deadline)
+
+            await asyncio.sleep(0.5)
+        except Exception as exc:
+            logger.debug("jobs.ac.uk page error %s: %s", url[:60], exc)
+
+    logger.info("jobs.ac.uk Serper+scrape: %d positions", len(results))
+    return results
 
 
 # ── Generic fallback ──────────────────────────────────────────────────────────
