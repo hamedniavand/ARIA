@@ -1,9 +1,13 @@
+import asyncio
 import base64
+import logging
 import secrets
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, Request
+
+logger = logging.getLogger(__name__)
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -43,7 +47,30 @@ class BasicAuthMiddleware(BaseHTTPMiddleware):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
+    asyncio.create_task(_resume_pending_preparations())
     yield
+
+
+async def _resume_pending_preparations():
+    """On startup: generate cover letters for any apps stuck in 'matched' state."""
+    import asyncio as _asyncio
+    await _asyncio.sleep(2)  # let the server fully start first
+    from models.application import Application, ApplicationStatus
+    from sqlmodel import Session, select as _select
+    from agent.matcher import prepare_application
+
+    with Session(engine) as s:
+        pending = s.exec(
+            _select(Application).where(Application.status == ApplicationStatus.matched)
+        ).all()
+
+    if pending:
+        logger.info("Resuming cover letter generation for %d matched apps", len(pending))
+        for app in pending:
+            try:
+                await prepare_application(app.id)
+            except Exception as exc:
+                logger.error("resume prepare_application %s failed: %s", app.id, exc)
 
 
 app = FastAPI(title="ARIA — Academic Research & Intelligence Agent", lifespan=lifespan)

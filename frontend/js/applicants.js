@@ -2,8 +2,11 @@
 VIEW_RENDERERS.applicants = renderApplicants;
 
 let _editingApplicant = null;
-let _docCache = {};      // applicant_id → [Document]
-let _credCache = {};     // applicant_id → [PortalCredential]
+let _docCache   = {};   // applicant_id → [Document]
+let _credCache  = {};   // applicant_id → [PortalCredential]
+let _overviews  = {};   // applicant_id → overview object
+let _checklists = {};   // applicant_id → [ChecklistItem]
+let _openCard   = null; // currently expanded applicant id
 
 function renderApplicants() {
   const el = document.getElementById('view-applicants');
@@ -16,38 +19,74 @@ function renderApplicants() {
   </div>
   <div id="applicant-form-wrap"></div>
   <div class="applicant-grid" id="applicant-grid"></div>`;
-
   renderApplicantGrid();
 }
 
 function renderApplicantGrid() {
   const grid = document.getElementById('applicant-grid');
   if (!grid) return;
-
   if (!state.applicants.length) {
     grid.innerHTML = `<div class="empty">No applicants yet. Add one to get started.</div>`;
     return;
   }
+  grid.innerHTML = state.applicants.map(a => _renderCard(a)).join('');
+  state.applicants.forEach(a => {
+    loadDocs(a.id);
+    loadCreds(a.id);
+    loadOverview(a.id);
+    loadChecklist(a.id);
+  });
+}
 
-  grid.innerHTML = state.applicants.map(a => {
-    const appCount = appsForApplicant(a.id)
-      .filter(ap => !['skipped','discovered'].includes(ap.status)).length;
+function _renderCard(a) {
+  const ov       = _overviews[a.id] || {};
+  const newCount = a.new_matches_count || 0;
+  const matched  = ov.total_matched ?? appsForApplicant(a.id).filter(ap => ap.status !== 'skipped').length;
+  const ready    = ov.ready ?? 0;
+  const submitted= ov.submitted ?? 0;
+  const lastRan  = a.last_matched_at ? new Date(a.last_matched_at).toLocaleDateString() : '—';
 
-    return `
-    <div class="applicant-card" id="acard-${a.id}">
-      <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
-        ${avatar(a.name, 34)}
-        <div>
-          <div class="acard-name">${escHtml(a.name)}</div>
-          <div class="acard-field">${escHtml(a.field_of_study)}</div>
+  return `
+  <div class="applicant-card" id="acard-${a.id}">
+
+    <!-- Header row -->
+    <div style="display:flex;align-items:flex-start;gap:10px;margin-bottom:8px">
+      ${avatar(a.name, 36)}
+      <div style="flex:1;min-width:0">
+        <div style="display:flex;align-items:center;gap:6px">
+          <span class="acard-name">${escHtml(a.name)}</span>
+          ${newCount > 0 ? `<span class="badge-new" title="${newCount} new match(es) since last view">${newCount} new</span>` : ''}
+        </div>
+        <div class="acard-field">${escHtml(a.field_of_study)}</div>
+        <div style="font-size:11px;color:#888780">${escHtml(a.email)}</div>
+      </div>
+    </div>
+
+    <!-- Mini stats row -->
+    <div class="acard-stats">
+      <div class="acard-stat"><div class="acard-stat-n">${matched}</div><div class="acard-stat-l">Matched</div></div>
+      <div class="acard-stat"><div class="acard-stat-n amber">${ready}</div><div class="acard-stat-l">Ready</div></div>
+      <div class="acard-stat"><div class="acard-stat-n green">${submitted}</div><div class="acard-stat-l">Submitted</div></div>
+      <div class="acard-stat"><div class="acard-stat-n" style="font-size:11px">${lastRan}</div><div class="acard-stat-l">Last Match</div></div>
+    </div>
+
+    <!-- Expandable detail panel -->
+    <div id="acard-detail-${a.id}" style="display:none;margin-top:10px;border-top:1px solid #f0eee6;padding-top:10px">
+
+      <!-- Checklist -->
+      <div style="margin-bottom:10px">
+        <div style="font-size:11px;font-weight:600;color:#555;margin-bottom:6px">Checklist</div>
+        <div id="checklist-${a.id}"></div>
+        <div style="display:flex;gap:6px;margin-top:6px">
+          <input id="cl-input-${a.id}" placeholder="Add task…" style="flex:1;padding:4px 8px;border:0.5px solid #d3d1c7;border-radius:5px;font-size:11px;font-family:inherit;background:#fff;outline:none"
+            onkeydown="if(event.key==='Enter')addChecklistItem(${a.id})">
+          <button class="act go" onclick="addChecklistItem(${a.id})">Add</button>
         </div>
       </div>
-      <div style="font-size:11px;color:#888780">${escHtml(a.email)}</div>
-      <div style="font-size:11px;color:#888780;margin-top:2px">${appCount} active application(s) &nbsp;·&nbsp; ${escHtml(a.preferred_language||'English')}</div>
 
       <!-- Documents -->
       <div class="doc-list">
-        <div style="font-size:11px;font-weight:500;color:#888780;margin-bottom:6px">Documents</div>
+        <div style="font-size:11px;font-weight:600;color:#555;margin-bottom:6px">Documents</div>
         <div id="docs-${a.id}"><span style="font-size:11px;color:#b4b2a9">Loading…</span></div>
         <div style="margin-top:8px;display:flex;align-items:center;gap:6px;flex-wrap:wrap">
           <select id="dtype-${a.id}" style="padding:3px 7px;border:0.5px solid #d3d1c7;border-radius:6px;font-size:11px;font-family:inherit;background:#fff;outline:none">
@@ -56,8 +95,7 @@ function renderApplicantGrid() {
             <option value="reference">Reference</option>
             <option value="portfolio">Portfolio</option>
           </select>
-          <label class="act" style="cursor:pointer">
-            + Upload
+          <label class="act" style="cursor:pointer">+ Upload
             <input type="file" style="display:none" onchange="uploadDoc(${a.id},this)">
           </label>
         </div>
@@ -65,23 +103,113 @@ function renderApplicantGrid() {
 
       <!-- Portal credentials -->
       <div class="doc-list">
-        <div style="font-size:11px;font-weight:500;color:#888780;margin-bottom:6px">Portal Credentials</div>
+        <div style="font-size:11px;font-weight:600;color:#555;margin-bottom:6px">Portal Credentials</div>
         <div id="creds-${a.id}"><span style="font-size:11px;color:#b4b2a9">Loading…</span></div>
         <button class="act" style="margin-top:6px;font-size:11px" onclick="showCredForm(${a.id})">+ Add credential</button>
         <div id="cred-form-${a.id}"></div>
       </div>
+    </div>
 
-      <div style="margin-top:12px;display:flex;gap:6px">
-        <button class="act go" onclick="showApplicantForm(${a.id})">Edit</button>
-        <button class="act err" onclick="deleteApplicant(${a.id})">Delete</button>
-      </div>
-    </div>`;
-  }).join('');
+    <!-- Action row -->
+    <div style="margin-top:10px;display:flex;gap:6px;flex-wrap:wrap">
+      <button class="act go" onclick="toggleCard(${a.id})" id="acard-toggle-${a.id}">▼ Details</button>
+      <button class="act go" onclick="showApplicantForm(${a.id})">Edit</button>
+      <button class="act" id="match-btn-${a.id}" onclick="triggerMatching(${a.id})">⚡ Match</button>
+      <button class="act" onclick="showAnalytics(${a.id})">Analytics</button>
+      <button class="act err" onclick="deleteApplicant(${a.id})">Delete</button>
+    </div>
+  </div>`;
+}
 
-  state.applicants.forEach(a => {
-    loadDocs(a.id);
-    loadCreds(a.id);
-  });
+// ── Card expand/collapse ──────────────────────────────────────────────────────
+
+function toggleCard(id) {
+  const panel  = document.getElementById(`acard-detail-${id}`);
+  const btn    = document.getElementById(`acard-toggle-${id}`);
+  const isOpen = panel.style.display !== 'none';
+  panel.style.display = isOpen ? 'none' : 'block';
+  btn.textContent = isOpen ? '▼ Details' : '▲ Details';
+  if (!isOpen) {
+    // Mark as viewed — reset new badge
+    api.post(`/applicants/${id}/viewed`, {}).catch(() => {});
+    const a = state.applicants.find(x => x.id === id);
+    if (a) { a.new_matches_count = 0; }
+    const badge = document.querySelector(`#acard-${id} .badge-new`);
+    if (badge) badge.remove();
+  }
+}
+
+// ── Overview ──────────────────────────────────────────────────────────────────
+
+async function loadOverview(id) {
+  try {
+    const ov = await api.get(`/applicants/${id}/overview`);
+    _overviews[id] = ov;
+    // Patch mini-stats in the already-rendered card
+    const card = document.getElementById(`acard-${id}`);
+    if (!card) return;
+    const ns = card.querySelectorAll('.acard-stat-n');
+    if (ns.length >= 3) {
+      ns[0].textContent = ov.total_matched ?? '—';
+      ns[1].textContent = ov.ready ?? '—';
+      ns[2].textContent = ov.submitted ?? '—';
+    }
+  } catch { /* ignore */ }
+}
+
+// ── Checklist ─────────────────────────────────────────────────────────────────
+
+async function loadChecklist(id) {
+  try {
+    const items = await api.get(`/applicants/${id}/checklist`);
+    _checklists[id] = items;
+    renderChecklist(id, items);
+  } catch { /* ignore */ }
+}
+
+function renderChecklist(id, items) {
+  const el = document.getElementById(`checklist-${id}`);
+  if (!el) return;
+  if (!items.length) {
+    el.innerHTML = `<span style="font-size:11px;color:#b4b2a9">No tasks yet</span>`;
+    return;
+  }
+  el.innerHTML = items.map(item => `
+    <div class="checklist-row" id="cli-${item.id}">
+      <input type="checkbox" ${item.done ? 'checked' : ''} onchange="toggleChecklistItem(${id},${item.id},this.checked)">
+      <span style="flex:1;font-size:12px;${item.done ? 'text-decoration:line-through;color:#aaa' : ''}">${escHtml(item.text)}</span>
+      <button class="act err" style="padding:1px 5px;font-size:10px" onclick="deleteChecklistItem(${id},${item.id})">×</button>
+    </div>`).join('');
+}
+
+async function addChecklistItem(id) {
+  const input = document.getElementById(`cl-input-${id}`);
+  const text  = input?.value.trim();
+  if (!text) return;
+  try {
+    const item = await api.post(`/applicants/${id}/checklist`, { text });
+    _checklists[id] = [...(_checklists[id] || []), item];
+    input.value = '';
+    renderChecklist(id, _checklists[id]);
+  } catch (e) { toast('Failed: ' + e.message, 'error'); }
+}
+
+async function toggleChecklistItem(applicantId, itemId, done) {
+  try {
+    await api.patch(`/applicants/${applicantId}/checklist/${itemId}`, { done });
+    const list = _checklists[applicantId] || [];
+    const idx  = list.findIndex(i => i.id === itemId);
+    if (idx >= 0) list[idx].done = done;
+    renderChecklist(applicantId, list);
+  } catch (e) { toast('Failed: ' + e.message, 'error'); }
+}
+
+async function deleteChecklistItem(applicantId, itemId) {
+  try {
+    await api.delete(`/applicants/${applicantId}/checklist/${itemId}`);
+    _checklists[applicantId] = (_checklists[applicantId] || []).filter(i => i.id !== itemId);
+    renderChecklist(applicantId, _checklists[applicantId]);
+  } catch (e) { toast('Failed: ' + e.message, 'error'); }
 }
 
 // ── Documents ─────────────────────────────────────────────────────────────────
@@ -122,9 +250,7 @@ async function uploadDoc(applicantId, input) {
     await api.upload(`/applicants/${applicantId}/documents`, fd);
     toast('Document uploaded — AI is summarising in background ✓', 'success');
     loadDocs(applicantId);
-  } catch (e) {
-    toast('Upload failed: ' + e.message, 'error');
-  }
+  } catch (e) { toast('Upload failed: ' + e.message, 'error'); }
 }
 
 async function deleteDoc(applicantId, docId) {
@@ -133,9 +259,7 @@ async function deleteDoc(applicantId, docId) {
     await api.delete(`/applicants/${applicantId}/documents/${docId}`);
     toast('Document deleted');
     loadDocs(applicantId);
-  } catch (e) {
-    toast('Failed: ' + e.message, 'error');
-  }
+  } catch (e) { toast('Failed: ' + e.message, 'error'); }
 }
 
 // ── Credentials ───────────────────────────────────────────────────────────────
@@ -157,9 +281,7 @@ function renderCreds(applicantId, creds) {
   }
   el.innerHTML = creds.map(c => `
     <div class="cred-item">
-      <div>
-        <span class="doc-tag">${escHtml(c.portal_domain)}</span>
-        ${escHtml(c.username)}
+      <div><span class="doc-tag">${escHtml(c.portal_domain)}</span>${escHtml(c.username)}
         ${c.notes ? `<span style="color:#888780"> — ${escHtml(c.notes)}</span>` : ''}
       </div>
       <button class="act err" style="padding:1px 6px;font-size:11px" onclick="deleteCred(${applicantId},${c.id})">×</button>
@@ -177,7 +299,7 @@ function showCredForm(applicantId) {
     <input id="cf-notes-${applicantId}"  placeholder="notes (optional)" style="padding:5px 8px;border:0.5px solid #d3d1c7;border-radius:6px;font-size:11px;font-family:inherit;background:#fff;outline:none">
     <div style="display:flex;gap:6px">
       <button class="act go" onclick="saveCred(${applicantId})">Save</button>
-      <button class="act"    onclick="document.getElementById('cred-form-${applicantId}').innerHTML=''">Cancel</button>
+      <button class="act" onclick="document.getElementById('cred-form-${applicantId}').innerHTML=''">Cancel</button>
     </div>
   </div>`;
 }
@@ -195,9 +317,7 @@ async function saveCred(applicantId) {
     toast('Credential saved ✓', 'success');
     document.getElementById(`cred-form-${applicantId}`).innerHTML = '';
     loadCreds(applicantId);
-  } catch (e) {
-    toast('Failed: ' + e.message, 'error');
-  }
+  } catch (e) { toast('Failed: ' + e.message, 'error'); }
 }
 
 async function deleteCred(applicantId, credId) {
@@ -206,9 +326,7 @@ async function deleteCred(applicantId, credId) {
     await api.delete(`/applicants/${applicantId}/credentials/${credId}`);
     toast('Credential deleted');
     loadCreds(applicantId);
-  } catch (e) {
-    toast('Failed: ' + e.message, 'error');
-  }
+  } catch (e) { toast('Failed: ' + e.message, 'error'); }
 }
 
 // ── Applicant form ────────────────────────────────────────────────────────────
@@ -262,9 +380,7 @@ async function saveApplicant() {
     cancelApplicantForm();
     await loadAll();
     renderApplicantGrid();
-  } catch (e) {
-    toast('Failed: ' + e.message, 'error');
-  }
+  } catch (e) { toast('Failed: ' + e.message, 'error'); }
 }
 
 function cancelApplicantForm() {
@@ -280,7 +396,30 @@ async function deleteApplicant(id) {
     toast('Applicant deleted');
     await loadAll();
     renderApplicantGrid();
+  } catch (e) { toast('Failed: ' + e.message, 'error'); }
+}
+
+// ── Manual match trigger ──────────────────────────────────────────────────────
+
+async function triggerMatching(applicantId) {
+  const btn = document.getElementById(`match-btn-${applicantId}`);
+  if (btn) { btn.disabled = true; btn.textContent = '⚡ Matching…'; }
+  try {
+    await api.post(`/applicants/${applicantId}/match`, {});
+    toast('Matching started — runs in background, check queue in a few minutes', 'success');
   } catch (e) {
-    toast('Failed: ' + e.message, 'error');
+    toast('Failed to start matching: ' + e.message, 'error');
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '⚡ Match'; }
+  }
+}
+
+// ── Analytics modal (delegated to analytics.js) ───────────────────────────────
+
+function showAnalytics(applicantId) {
+  navigateTo('analytics');
+  // Let analytics.js know which applicant to show
+  if (typeof renderAnalyticsForApplicant === 'function') {
+    setTimeout(() => renderAnalyticsForApplicant(applicantId), 80);
   }
 }

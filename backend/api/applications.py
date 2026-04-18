@@ -27,6 +27,7 @@ def list_applications(
     status: Optional[ApplicationStatus] = Query(None),
     applicant_id: Optional[int] = Query(None),
     position_id: Optional[int] = Query(None),
+    sort: Optional[str] = Query("priority"),   # priority | score | date
     session: Session = Depends(get_session),
 ):
     q = select(Application)
@@ -36,7 +37,17 @@ def list_applications(
         q = q.where(Application.applicant_id == applicant_id)
     if position_id is not None:
         q = q.where(Application.position_id == position_id)
-    return session.exec(q.order_by(Application.created_at.desc())).all()
+
+    results = session.exec(q).all()
+
+    if sort == "priority":
+        results = sorted(results, key=lambda x: x.priority_score or x.match_score, reverse=True)
+    elif sort == "score":
+        results = sorted(results, key=lambda x: x.match_score, reverse=True)
+    else:
+        results = sorted(results, key=lambda x: x.created_at or datetime.min, reverse=True)
+
+    return results
 
 
 @router.get("/{application_id}", response_model=Application)
