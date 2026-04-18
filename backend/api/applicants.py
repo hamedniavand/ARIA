@@ -10,7 +10,7 @@ import aiofiles
 
 from core.database import get_session
 from core.config import UPLOADS_DIR
-from models.applicant import Applicant, Document
+from models.applicant import Applicant, Document, ChecklistItem
 from models.portal_credential import PortalCredential
 
 router = APIRouter()
@@ -24,6 +24,15 @@ class ApplicantUpdate(BaseModel):
     field_of_study: Optional[str] = None
     bio: Optional[str] = None
     preferred_language: Optional[str] = None
+
+
+class ChecklistItemIn(BaseModel):
+    text: str
+
+
+class ChecklistItemUpdate(BaseModel):
+    done: Optional[bool] = None
+    text: Optional[str] = None
 
 
 class CredentialIn(BaseModel):
@@ -41,11 +50,17 @@ def list_applicants(session: Session = Depends(get_session)):
 
 
 @router.post("", response_model=Applicant, status_code=201)
-def create_applicant(applicant: Applicant, session: Session = Depends(get_session)):
+def create_applicant(
+    applicant: Applicant,
+    background_tasks: BackgroundTasks,
+    session: Session = Depends(get_session),
+):
     applicant.id = None  # ensure DB assigns it
     session.add(applicant)
     session.commit()
     session.refresh(applicant)
+    # Immediately match this new applicant against all existing positions
+    background_tasks.add_task(_match_new_applicant, applicant.id)
     return applicant
 
 
@@ -194,6 +209,12 @@ async def _regenerate_covers_for_applicant(applicant_id: int) -> None:
         await prepare_application(app_id)
 
 
+async def _match_new_applicant(applicant_id: int) -> None:
+    """Match a newly created applicant against all existing positions."""
+    from agent.matcher import run_matching_for_applicant
+    await run_matching_for_applicant(applicant_id)
+
+
 def _extract_text(file_path: str) -> str:
     if file_path.lower().endswith(".pdf"):
         try:
@@ -208,6 +229,229 @@ def _extract_text(file_path: str) -> str:
             return f.read()
     except Exception:
         return ""
+
+
+# ── Manual re-match trigger ───────────────────────────────────────────────────
+
+@router.post("/{applicant_id}/match")
+def trigger_matching(
+    applicant_id: int,
+    background_tasks: BackgroundTasks,
+    session: Session = Depends(get_session),
+):
+    """Trigger matching of this applicant against all positions they haven't been scored for."""
+    a = session.get(Applicant, applicant_id)
+    if not a:
+        raise HTTPException(status_code=404, detail="Applicant not found")
+    background_tasks.add_task(_match_new_applicant, applicant_id)
+    return {"status": "matching started", "applicant_id": applicant_id}
+
+
+# ── Applicant viewed — reset new_matches_count ───────────────────────────────
+
+@router.post("/{applicant_id}/viewed", status_code=204)
+def mark_viewed(applicant_id: int, session: Session = Depends(get_session)):
+    """Call when the user opens the applicant's profile — resets the new-match badge."""
+    a = session.get(Applicant, applicant_id)
+    if a:
+        a.new_matches_count = 0
+        session.add(a)
+        session.commit()
+
+
+# ── Applicant overview ────────────────────────────────────────────────────────
+
+@router.get("/{applicant_id}/overview")
+def get_overview(applicant_id: int, session: Session = Depends(get_session)):
+    """Return counts and per-status breakdown for an applicant's applications."""
+    from models.application import Application, ApplicationStatus
+    a = session.get(Applicant, applicant_id)
+    if not a:
+        raise HTTPException(status_code=404, detail="Applicant not found")
+
+    apps = session.exec(
+        select(Application).where(Application.applicant_id == applicant_id)
+    ).all()
+
+    by_status: dict = {}
+    for app in apps:
+        by_status[app.status] = by_status.get(app.status, 0) + 1
+
+    matched   = sum(1 for ap in apps if ap.status not in (ApplicationStatus.skipped,))
+    skipped   = by_status.get(ApplicationStatus.skipped, 0)
+    ready     = by_status.get(ApplicationStatus.ready, 0)
+    submitted = by_status.get(ApplicationStatus.submitted, 0) + by_status.get(ApplicationStatus.confirmed, 0)
+    errors    = by_status.get(ApplicationStatus.error, 0)
+
+    # Top matches by priority_score
+    top = sorted(
+        [ap for ap in apps if ap.status not in (ApplicationStatus.skipped,)],
+        key=lambda x: x.priority_score or x.match_score,
+        reverse=True,
+    )[:5]
+
+    return {
+        "applicant_id": applicant_id,
+        "last_matched_at": a.last_matched_at.isoformat() if a.last_matched_at else None,
+        "new_matches_count": a.new_matches_count or 0,
+        "total_evaluated": len(apps),
+        "total_matched": matched,
+        "total_skipped": skipped,
+        "ready": ready,
+        "submitted": submitted,
+        "errors": errors,
+        "by_status": {k: v for k, v in by_status.items()},
+        "top_matches": [
+            {
+                "application_id": ap.id,
+                "position_id": ap.position_id,
+                "match_score": ap.match_score,
+                "priority_score": ap.priority_score,
+                "status": ap.status,
+                "reason": ap.error_message,
+            }
+            for ap in top
+        ],
+    }
+
+
+# ── Checklist ─────────────────────────────────────────────────────────────────
+
+@router.get("/{applicant_id}/checklist", response_model=List[ChecklistItem])
+def list_checklist(applicant_id: int, session: Session = Depends(get_session)):
+    return session.exec(
+        select(ChecklistItem)
+        .where(ChecklistItem.applicant_id == applicant_id)
+        .order_by(ChecklistItem.created_at)
+    ).all()
+
+
+@router.post("/{applicant_id}/checklist", response_model=ChecklistItem, status_code=201)
+def add_checklist_item(
+    applicant_id: int,
+    data: ChecklistItemIn,
+    session: Session = Depends(get_session),
+):
+    if not session.get(Applicant, applicant_id):
+        raise HTTPException(status_code=404, detail="Applicant not found")
+    item = ChecklistItem(applicant_id=applicant_id, text=data.text.strip())
+    session.add(item)
+    session.commit()
+    session.refresh(item)
+    return item
+
+
+@router.patch("/{applicant_id}/checklist/{item_id}", response_model=ChecklistItem)
+def update_checklist_item(
+    applicant_id: int,
+    item_id: int,
+    data: ChecklistItemUpdate,
+    session: Session = Depends(get_session),
+):
+    item = session.get(ChecklistItem, item_id)
+    if not item or item.applicant_id != applicant_id:
+        raise HTTPException(status_code=404, detail="Item not found")
+    if data.done is not None:
+        item.done = data.done
+    if data.text is not None:
+        item.text = data.text.strip()
+    session.add(item)
+    session.commit()
+    session.refresh(item)
+    return item
+
+
+@router.delete("/{applicant_id}/checklist/{item_id}", status_code=204)
+def delete_checklist_item(
+    applicant_id: int,
+    item_id: int,
+    session: Session = Depends(get_session),
+):
+    item = session.get(ChecklistItem, item_id)
+    if not item or item.applicant_id != applicant_id:
+        raise HTTPException(status_code=404, detail="Item not found")
+    session.delete(item)
+    session.commit()
+
+
+# ── Tailored CV ───────────────────────────────────────────────────────────────
+
+@router.post("/{applicant_id}/applications/{application_id}/tailored-cv")
+async def generate_tailored_cv(
+    applicant_id: int,
+    application_id: int,
+    session: Session = Depends(get_session),
+):
+    from models.application import Application
+    from models.position import Position
+    from agent.generator import generate_tailored_cv as _gen_cv
+
+    app = session.get(Application, application_id)
+    if not app or app.applicant_id != applicant_id:
+        raise HTTPException(status_code=404, detail="Application not found")
+
+    a = session.get(Applicant, applicant_id)
+    position = session.get(Position, app.position_id)
+    docs = session.exec(select(Document).where(Document.applicant_id == applicant_id)).all()
+
+    cv_text = await _gen_cv(position, a, list(docs))
+    if not cv_text:
+        raise HTTPException(status_code=500, detail="CV generation failed")
+
+    app.tailored_cv = cv_text
+    session.add(app)
+    session.commit()
+    return {"tailored_cv": cv_text}
+
+
+# ── Analytics ─────────────────────────────────────────────────────────────────
+
+@router.get("/{applicant_id}/analytics")
+def get_analytics(applicant_id: int, session: Session = Depends(get_session)):
+    """Return timeline + funnel data for Chart.js rendering."""
+    from models.application import Application, ApplicationStatus
+    from collections import defaultdict
+
+    a = session.get(Applicant, applicant_id)
+    if not a:
+        raise HTTPException(status_code=404, detail="Applicant not found")
+
+    apps = session.exec(
+        select(Application).where(Application.applicant_id == applicant_id)
+    ).all()
+
+    # Funnel: matched → ready → submitted
+    funnel = {
+        "Matched":   sum(1 for ap in apps if ap.status != ApplicationStatus.skipped),
+        "Ready":     sum(1 for ap in apps if ap.status in (ApplicationStatus.ready, ApplicationStatus.submitted, ApplicationStatus.confirmed)),
+        "Submitted": sum(1 for ap in apps if ap.status in (ApplicationStatus.submitted, ApplicationStatus.confirmed)),
+    }
+
+    # Timeline: count of applications created per day (last 60 days)
+    daily: dict = defaultdict(int)
+    for ap in apps:
+        if ap.created_at:
+            day = ap.created_at.strftime("%Y-%m-%d")
+            daily[day] += 1
+    timeline = [{"date": d, "count": c} for d, c in sorted(daily.items())[-60:]]
+
+    # Score distribution buckets
+    score_buckets = {"90-100": 0, "75-89": 0, "55-74": 0, "below 55": 0}
+    for ap in apps:
+        if ap.status == ApplicationStatus.skipped:
+            continue
+        s = ap.match_score
+        if s >= 90:    score_buckets["90-100"] += 1
+        elif s >= 75:  score_buckets["75-89"] += 1
+        elif s >= 55:  score_buckets["55-74"] += 1
+        else:          score_buckets["below 55"] += 1
+
+    return {
+        "applicant_id": applicant_id,
+        "funnel": funnel,
+        "timeline": timeline,
+        "score_distribution": score_buckets,
+    }
 
 
 # ── Portal Credentials ────────────────────────────────────────────────────────

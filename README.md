@@ -2,24 +2,28 @@
 
 An automated platform that discovers PhD and research positions from multiple job boards and Telegram channels, scores them against applicant profiles using Gemini AI, generates tailored multi-language cover letters, and submits applications via a Playwright browser agent — all from a password-protected web dashboard.
 
-> **Status:** Phases 1–5, 7–8 complete · Phase 6 (apply reliability) in progress
+> **Status:** Phases 1–5, 7–10 complete · Phase 6 (apply reliability) in progress
 
 ---
 
 ## Features
 
 - **Automated scraping** — 9 sources: EURAXESS, jobs.ac.uk, phdscanner.com, academicpositions.com, ae.indeed.com, nature.com/naturecareers, timeshighereducation.com, Telegram channels, any RSS/Atom feed; multi-page pagination; cross-source duplicate detection
-- **AI matching** — Gemini 2.5 Flash scores each position against each applicant using full CV/SOP text (field alignment, skills, research fit); auto-regenerates cover letters when profile changes
+- **AI matching** — Gemini 2.5 Flash scores each position against each applicant using full CV/SOP text; 4-dimension rubric (field alignment, skills, research fit, profile strength); ~8× concurrent scoring; field pre-filter eliminates ~50% of calls without touching the API
+- **Priority queue** — combined score = match% × deadline urgency (2× boost for deadlines ≤7 days); urgency badges and 4-bar breakdown visible in queue
 - **Multi-language cover letters** — tailored academic cover letters in 18 languages, editable before approval
+- **Tailored CV** — Gemini restructures the applicant's full CV specifically for each position (one click in queue)
+- **Per-applicant matching** — adding or updating an applicant auto-triggers matching against all existing positions; manual ⚡ Match button available per card
+- **Startup resume** — service restart automatically resumes any interrupted cover letter generation
 - **Browser agent** — Playwright navigates to application portals, handles cookie consent, detects and fills forms, takes before/after screenshots
 - **CAPTCHA solving** — automatic reCAPTCHA v2 / hCaptcha solving via CapSolver API
-- **Multi-applicant** — manage multiple PhD applicants, each with their own documents, credentials, and match queue
-- **Document indexing** — upload CV/SOP/references; AI summarises them for better matching
+- **Multi-applicant** — manage multiple PhD applicants, each with their own documents, credentials, match queue, and task checklist
+- **Document indexing** — upload CV/SOP/references (PDF, DOCX, DOC, plain text); AI summarises for better matching
 - **Portal credentials vault** — store login credentials per applicant per portal
+- **Per-applicant analytics** — funnel chart, applications-over-time bar chart, score distribution doughnut (Chart.js)
 - **Review queue** — human-in-the-loop: review cover letter, then approve to trigger auto-submission
-- **Analytics dashboard** — pipeline funnel, match/submission rates per source and per applicant
 - **Rich dashboard** — sortable tables, applicant filter, batch operations, reliability score + match yield per source
-- **Production-ready** — systemd service, HTTP Basic Auth, log rotation
+- **Production-ready** — systemd service, HTTP Basic Auth, log rotation, startup recovery
 
 ---
 
@@ -46,21 +50,20 @@ ARIA/
 │   │   ├── config.py            # .env loader, all config vars
 │   │   └── database.py          # SQLite engine, init_db()
 │   ├── models/
-│   │   ├── applicant.py         # Applicant (+ preferred_language), Document
+│   │   ├── applicant.py         # Applicant, Document, ChecklistItem
 │   │   ├── source.py            # Source (job board URL)
-│   │   ├── position.py          # Position (scraped job)
-│   │   ├── application.py       # Application + ApplicationStatus enum
+│   │   ├── position.py          # Position (field, deadline, apply_url)
+│   │   ├── application.py       # Application + priority_score + match_breakdown + tailored_cv
 │   │   └── portal_credential.py
 │   ├── api/
-│   │   ├── applicants.py        # CRUD + document upload + credentials
+│   │   ├── applicants.py        # CRUD + docs + credentials + checklist + overview + analytics + match trigger
 │   │   ├── sources.py           # CRUD + /scan + reliability score
 │   │   ├── positions.py         # list/get + batch delete
-│   │   └── applications.py      # list/get/patch + approve + retry + batch status
+│   │   └── applications.py      # list/get/patch + approve + retry + batch status + sort
 │   └── agent/
-│       ├── scraper.py           # Multi-site scraper (EURAXESS, jobs.ac.uk, phdscanner,
-│       │                        #   academicpositions, indeed, findaphd, Telegram)
-│       ├── matcher.py           # Gemini scoring + cover letter pipeline
-│       ├── generator.py         # Gemini cover letter (multi-language) + doc summarisation
+│       ├── scraper.py           # Multi-site scraper + field classifier + aggregator URL resolver
+│       ├── matcher.py           # Gemini scoring (8× concurrent, field pre-filter, priority score)
+│       ├── generator.py         # Cover letter + tailored CV + doc summarisation (retry w/ backoff)
 │       └── browser.py           # Playwright form detection + CAPTCHA solving + submission
 ├── frontend/
 │   ├── index.html               # SPA shell
@@ -307,6 +310,25 @@ ctx = await browser.new_context(
 - [x] Auto-regenerate cover letters — updating bio / field of study / language, or uploading a new document, automatically re-generates all `ready` cover letters for that applicant
 - [x] Match yield per source — Sources table now shows "Match Yield %": fraction of positions from each source that resulted in ≥1 match, sortable column
 
+### ✅ Phase 10 — Applicant Intelligence & Matching Reliability
+- [x] **Fixed critical matching bug** — 429 errors silently marked all apps as skipped; now uses sentinel value and retries with API-provided wait time
+- [x] **Per-applicant matching** — new applicants auto-matched against all existing positions; manual ⚡ Match button per card
+- [x] **8× concurrent scoring** — parallel Gemini calls per batch (was sequential)
+- [x] **Field pre-filter** — eliminates ~50% of Gemini calls for obvious field mismatches
+- [x] **Startup resume** — service restart resumes interrupted cover letter generation
+- [x] **Priority score** — match% × deadline urgency multiplier; urgency badges in queue (🔥 ≤7d, ⚠ ≤14d)
+- [x] **Sort controls** — queue sortable by priority / score / deadline / date
+- [x] **Match breakdown** — 4-bar breakdown per queue card (field, skills, research, profile)
+- [x] **Tailored CV** — "📄 Tailor CV" button generates position-specific CV restructured by Gemini
+- [x] **Per-applicant analytics** — funnel, timeline bar chart, score distribution doughnut (Chart.js)
+- [x] **Applicant overview** — mini stats row + expandable detail panel per card
+- [x] **Task checklist** — per-applicant checklist with checkbox state, add/delete
+- [x] **New-match badge** — pulsing badge shows count since last view; resets on card open
+- [x] **Last matched timestamp** on applicant card
+- [x] **PDF + DOCX + DOC** document support for CV extraction
+- [x] **Aggregator URL resolution** — academicpositions.com and similar now store real university URL
+- [x] **Improved Gemini prompt** — explicit calibration; scores on bio+field when CV absent
+
 ---
 
 ## API Reference
@@ -327,15 +349,26 @@ ctx = await browser.new_context(
 | POST | `/api/applications/{id}/retry` | Retry a failed application |
 | GET | `/api/applications/{id}/screenshots` | List submission screenshots |
 | GET | `/api/applicants` | List applicants |
-| POST | `/api/applicants` | Create applicant |
-| PATCH | `/api/applicants/{id}` | Update applicant (incl. preferred_language) |
+| POST | `/api/applicants` | Create applicant (auto-triggers matching) |
+| PATCH | `/api/applicants/{id}` | Update applicant |
+| DELETE | `/api/applicants/{id}` | Delete applicant |
+| POST | `/api/applicants/{id}/match` | Trigger matching against all unscored positions |
+| POST | `/api/applicants/{id}/viewed` | Reset new-match badge |
+| GET | `/api/applicants/{id}/overview` | Stats summary + top 5 matches |
+| GET | `/api/applicants/{id}/analytics` | Funnel + timeline + score distribution |
 | POST | `/api/applicants/{id}/documents` | Upload document (CV/SOP/etc.) |
 | DELETE | `/api/applicants/{id}/documents/{doc_id}` | Delete document |
 | GET | `/api/applicants/{id}/credentials` | List portal credentials |
 | POST | `/api/applicants/{id}/credentials` | Save portal credential |
 | DELETE | `/api/applicants/{id}/credentials/{cred_id}` | Delete credential |
+| GET | `/api/applicants/{id}/checklist` | List checklist items |
+| POST | `/api/applicants/{id}/checklist` | Add checklist item |
+| PATCH | `/api/applicants/{id}/checklist/{item_id}` | Update checklist item |
+| DELETE | `/api/applicants/{id}/checklist/{item_id}` | Delete checklist item |
+| POST | `/api/applicants/{id}/applications/{app_id}/tailored-cv` | Generate Gemini-tailored CV |
 | GET | `/api/stats` | Pipeline stage counts |
 | GET | `/api/analytics` | Match/submission rates by source and applicant |
+| GET | `/api/serper-usage` | Shared Serper quota counter |
 | GET | `/api/health` | Health check (no auth required) |
 
 ---

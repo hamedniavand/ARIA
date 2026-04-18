@@ -1,6 +1,133 @@
 // ── Analytics view ────────────────────────────────────────────────────────────
 VIEW_RENDERERS.analytics = renderAnalytics;
 
+// Chart instances — destroyed & recreated on each render to avoid stale canvas issues
+let _chartTimeline = null;
+let _chartFunnel   = null;
+let _chartScoreDist = null;
+
+// Called from applicants.js "Analytics" button
+async function renderAnalyticsForApplicant(applicantId) {
+  const el = document.getElementById('view-analytics');
+  const applicant = state.applicants.find(a => a.id === applicantId);
+  const name = applicant ? applicant.name : `Applicant #${applicantId}`;
+
+  el.innerHTML = `
+  <div class="topbar">
+    <h2>Analytics — ${escHtml(name)}</h2>
+    <div class="topbar-right">
+      <button class="btn" onclick="renderAnalytics()">← All Applicants</button>
+    </div>
+  </div>
+  <div id="appl-analytics-body"><div class="empty">Loading…</div></div>`;
+
+  let data;
+  try {
+    data = await api.get(`/applicants/${applicantId}/analytics`);
+  } catch (e) {
+    document.getElementById('appl-analytics-body').innerHTML =
+      `<div class="empty">Failed to load: ${escHtml(e.message)}</div>`;
+    return;
+  }
+
+  const { funnel, timeline, score_distribution } = data;
+  const fMax = Math.max(funnel.Matched || 0, 1);
+
+  function funnelRow(label, value, cls) {
+    const pct = Math.round(value / fMax * 100);
+    return `
+    <div class="funnel-row">
+      <div class="funnel-label">${label}</div>
+      <div class="funnel-track"><div class="funnel-fill ${cls}" style="width:${Math.max(pct,2)}%"></div></div>
+      <div class="funnel-val">${value} <span class="funnel-pct">${pct}%</span></div>
+    </div>`;
+  }
+
+  // Score distribution
+  const sdLabels = Object.keys(score_distribution);
+  const sdData   = Object.values(score_distribution);
+  const sdColors = ['#3b6d11','#185fa5','#b45309','#9a3412'];
+
+  document.getElementById('appl-analytics-body').innerHTML = `
+
+  <!-- Funnel -->
+  <div class="analytics-card">
+    <div class="analytics-card-title">Application Funnel</div>
+    ${funnelRow('AI Matched', funnel.Matched || 0, 'f-match')}
+    ${funnelRow('Ready to Review', funnel.Ready || 0, 'f-ready')}
+    ${funnelRow('Submitted', funnel.Submitted || 0, 'f-sub')}
+  </div>
+
+  <!-- Timeline chart -->
+  <div class="analytics-card">
+    <div class="analytics-card-title">Applications Over Time (last 60 days)</div>
+    ${timeline.length ? `<canvas id="chart-timeline" height="90"></canvas>` :
+      '<div class="empty" style="padding:20px 0">No data yet</div>'}
+  </div>
+
+  <!-- Score distribution chart -->
+  <div class="analytics-card">
+    <div class="analytics-card-title">Match Score Distribution</div>
+    <div style="display:flex;gap:20px;align-items:center">
+      <canvas id="chart-scores" width="200" height="200" style="max-width:200px"></canvas>
+      <div>${sdLabels.map((l,i) => `
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+          <div style="width:12px;height:12px;border-radius:2px;background:${sdColors[i]};flex-shrink:0"></div>
+          <span style="font-size:12px">${l}</span>
+          <span style="font-size:12px;font-weight:600;margin-left:auto;padding-left:12px">${sdData[i]}</span>
+        </div>`).join('')}
+      </div>
+    </div>
+  </div>`;
+
+  // ── Timeline Chart ─────────────────────────────────────────────────────────
+  if (timeline.length) {
+    if (_chartTimeline) { _chartTimeline.destroy(); _chartTimeline = null; }
+    const ctx = document.getElementById('chart-timeline');
+    if (ctx) {
+      _chartTimeline = new Chart(ctx, {
+        type: 'bar',
+        data: {
+          labels: timeline.map(t => t.date),
+          datasets: [{
+            label: 'Applications',
+            data:  timeline.map(t => t.count),
+            backgroundColor: '#185fa5',
+            borderRadius: 3,
+          }]
+        },
+        options: {
+          responsive: true,
+          plugins: { legend: { display: false } },
+          scales: {
+            x: { grid: { display: false }, ticks: { font: { size: 10 }, maxTicksLimit: 12 } },
+            y: { beginAtZero: true, ticks: { precision: 0, font: { size: 10 } }, grid: { color: '#f0ede4' } },
+          }
+        }
+      });
+    }
+  }
+
+  // ── Score Distribution Doughnut ────────────────────────────────────────────
+  if (_chartScoreDist) { _chartScoreDist.destroy(); _chartScoreDist = null; }
+  const ctxS = document.getElementById('chart-scores');
+  if (ctxS && sdData.some(v => v > 0)) {
+    _chartScoreDist = new Chart(ctxS, {
+      type: 'doughnut',
+      data: {
+        labels: sdLabels,
+        datasets: [{ data: sdData, backgroundColor: sdColors, borderWidth: 1 }]
+      },
+      options: {
+        responsive: false,
+        plugins: { legend: { display: false }, tooltip: { callbacks: {
+          label: ctx => ` ${ctx.label}: ${ctx.raw}`
+        }}}
+      }
+    });
+  }
+}
+
 async function renderAnalytics() {
   const el = document.getElementById('view-analytics');
   el.innerHTML = `<div class="topbar"><h2>Analytics</h2></div><div id="analytics-body"><div class="empty">Loading…</div></div>`;

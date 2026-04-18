@@ -26,6 +26,29 @@ HEADERS = {
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
 }
 
+_COUNTRY_HINTS = {
+    "United Kingdom": ["uk", "united kingdom", "england", "scotland", "wales", "britain"],
+    "Germany":        ["germany", "deutschland", "german"],
+    "Netherlands":    ["netherlands", "holland", "dutch"],
+    "Belgium":        ["belgium", "belgique", "belgian"],
+    "France":         ["france", "french", "paris"],
+    "Switzerland":    ["switzerland", "swiss", "zurich", "geneva"],
+    "Sweden":         ["sweden", "swedish", "stockholm"],
+    "Denmark":        ["denmark", "danish", "copenhagen"],
+    "Norway":         ["norway", "norwegian"],
+    "Finland":        ["finland", "finnish"],
+    "Austria":        ["austria", "austrian", "vienna"],
+    "Italy":          ["italy", "italian"],
+    "Spain":          ["spain", "spanish"],
+    "United States":  ["usa", "united states", "u.s.", "america"],
+    "Canada":         ["canada", "canadian"],
+    "Australia":      ["australia", "australian"],
+    "Japan":          ["japan", "japanese"],
+    "China":          ["china", "chinese"],
+    "Singapore":      ["singapore"],
+    "Hong Kong":      ["hong kong"],
+}
+
 # ── Field classifier ─────────────────────────────────────────────────────────
 
 _FIELD_MAP = {
@@ -112,13 +135,19 @@ async def scrape_source(source_id: int) -> List[int]:
         ) as client:
             raw = await _fetch_all_pages(client, url)
 
-            # Post-fetch: fill in missing deadlines by visiting individual pages
+            # Post-fetch: enrich description + fill in missing deadlines
             for item in raw:
-                if not item.get("deadline") and item.get("apply_url"):
-                    dl = await _fetch_deadline_from_url(client, item["apply_url"])
-                    if dl:
-                        item["deadline"] = dl
-                        logger.debug("Deadline fetched for %s: %s", item["apply_url"][:60], dl)
+                apply_url = item.get("apply_url", "")
+                if apply_url:
+                    # Enrich short descriptions by visiting the position page
+                    if len(item.get("description", "")) < 400:
+                        item = await _enrich_from_url(client, item)
+                    # Extract deadline if missing
+                    if not item.get("deadline"):
+                        dl = await _fetch_deadline_from_url(client, apply_url)
+                        if dl:
+                            item["deadline"] = dl
+                            logger.debug("Deadline fetched for %s: %s", apply_url[:60], dl)
     except Exception as exc:
         logger.error("Scrape failed for source %s (%s): %s", source_id, url, exc)
         raw = []  # fall through so last_scraped_at is still updated below
@@ -1061,6 +1090,134 @@ async def _fetch_deadline_from_url(client: httpx.AsyncClient, apply_url: str) ->
             return result[:80]
     except Exception as exc:
         logger.debug("Deadline fetch error %s: %s", apply_url[:60], exc)
+    return None
+
+
+# ── Deep-link enrichment ─────────────────────────────────────────────────────
+
+_AGGREGATOR_DOMAINS = {"academicpositions.com", "findaphd.com", "scholarshipdb.net",
+                        "scholarshipportal.com", "euraxess.ec.europa.eu"}
+
+
+async def _enrich_from_url(client: httpx.AsyncClient, item: Dict) -> Dict:
+    """
+    Fetch the position's apply_url and extract richer description, supervisor,
+    requirements and deadline if not already present.
+    For aggregator sites, also try to find the real university URL.
+    """
+    apply_url = item.get("apply_url", "")
+    if not apply_url or not apply_url.startswith("http"):
+        return item
+    # Don't re-fetch Telegram permalinks or known blocked domains
+    skip_domains = {"t.me", "linkedin.com", "twitter.com", "x.com"}
+    if any(d in apply_url for d in skip_domains):
+        return item
+
+    is_aggregator = any(d in apply_url for d in _AGGREGATOR_DOMAINS)
+
+    try:
+        resp = await client.get(apply_url, timeout=12, follow_redirects=True)
+        final_url = str(resp.url)
+
+        if resp.status_code not in (200, 301, 302):
+            return item
+
+        soup = BeautifulSoup(resp.text[:60000], "html.parser")
+
+        # ── For aggregator pages: find the real external "Apply" link ──────────
+        if is_aggregator:
+            real_url = _extract_real_apply_url(soup, apply_url)
+            if real_url:
+                logger.debug("Aggregator %s → real URL: %s", apply_url[:60], real_url[:60])
+                item["apply_url"] = real_url
+                # Now try to fetch the real page for description
+                try:
+                    real_resp = await client.get(real_url, timeout=12, follow_redirects=True)
+                    if real_resp.status_code == 200:
+                        real_soup = BeautifulSoup(real_resp.text[:60000], "html.parser")
+                        for tag in real_soup(["script", "style", "nav", "header", "footer", "aside"]):
+                            tag.decompose()
+                        real_text = real_soup.get_text(separator="\n", strip=True)
+                        if len(real_text) > 300:
+                            item["description"] = real_text[:4000]
+                        return item
+                except Exception:
+                    pass
+
+        # Remove boilerplate elements
+        for tag in soup(["script", "style", "nav", "header", "footer", "aside"]):
+            tag.decompose()
+        visible = soup.get_text(separator="\n", strip=True)
+        if len(visible) < 200:
+            return item
+
+        # Enrich description if current one is short
+        if len(item.get("description", "")) < 300 and len(visible) > 300:
+            item["description"] = visible[:4000]
+
+        # Extract university if missing
+        if not item.get("university"):
+            for line in visible.splitlines():
+                if any(k in line for k in ("University", "Institut", "College", "School", "Laboratory", "Center", "Centre")):
+                    item["university"] = line.strip()[:150]
+                    break
+
+        # Extract country if missing
+        if not item.get("country"):
+            text_lower = visible.lower()
+            for country, hints in _COUNTRY_HINTS.items():
+                if any(h in text_lower for h in hints):
+                    item["country"] = country
+                    break
+
+        logger.debug("Enriched position from %s (%d chars description)", apply_url[:60], len(item.get("description", "")))
+    except Exception as exc:
+        logger.debug("Enrich failed for %s: %s", apply_url[:60], exc)
+    return item
+
+
+def _extract_real_apply_url(soup: BeautifulSoup, aggregator_url: str) -> Optional[str]:
+    """
+    Find the real university/lab URL from an aggregator page.
+    Looks for 'Apply', 'Visit website', 'More information', external link buttons.
+    """
+    aggregator_domain = urlparse(aggregator_url).netloc.replace("www.", "")
+
+    # Candidate link texts that likely lead to the real page
+    apply_texts = {
+        "apply", "apply now", "apply here", "apply online",
+        "visit website", "more information", "more info",
+        "read more", "view position", "official page",
+        "university website", "job posting", "full description",
+    }
+
+    for a in soup.find_all("a", href=True):
+        href = a.get("href", "").strip()
+        text = a.get_text(strip=True).lower()
+        if not href.startswith("http"):
+            continue
+        link_domain = urlparse(href).netloc.replace("www.", "")
+        # Must be external (not the same aggregator)
+        if aggregator_domain in link_domain:
+            continue
+        # Skip known junk
+        if any(d in link_domain for d in ("google.com", "facebook.com", "twitter.com",
+                                           "linkedin.com", "cloudflare.com", "cookie")):
+            continue
+        if text in apply_texts or any(kw in text for kw in ("apply", "official", "position", "vacancy")):
+            return href
+
+    # Fallback: look for any external link to an .edu / .ac. domain
+    for a in soup.find_all("a", href=True):
+        href = a.get("href", "").strip()
+        if not href.startswith("http"):
+            continue
+        link_domain = urlparse(href).netloc
+        if aggregator_domain in link_domain:
+            continue
+        if ".edu" in link_domain or ".ac." in link_domain or "university" in link_domain.lower():
+            return href
+
     return None
 
 
