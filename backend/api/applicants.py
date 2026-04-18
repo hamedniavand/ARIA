@@ -59,8 +59,6 @@ def create_applicant(
     session.add(applicant)
     session.commit()
     session.refresh(applicant)
-    # Immediately match this new applicant against all existing positions
-    background_tasks.add_task(_match_new_applicant, applicant.id)
     return applicant
 
 
@@ -92,8 +90,6 @@ def update_applicant(
     session.add(a)
     session.commit()
     session.refresh(a)
-    if profile_changed:
-        background_tasks.add_task(_regenerate_covers_for_applicant, applicant_id)
     return a
 
 
