@@ -114,13 +114,14 @@ function toast(msg, type = '') {
 // ── Data loading ──────────────────────────────────────────────────────────────
 async function loadAll() {
   try {
-    const [applicants, positions, applications, sources, stats, serper] = await Promise.all([
+    const [applicants, positions, applications, sources, stats, serper, gemini] = await Promise.all([
       api.get('/applicants'),
       api.get('/positions'),
       api.get('/applications'),
       api.get('/sources'),
       api.get('/stats'),
       api.get('/serper-usage').catch(() => ({ used: 0, limit: 2500 })),
+      api.get('/gemini-usage').catch(() => ({ total_tokens: 0, calls: 0, cost_eur: 0 })),
     ]);
     state.applicants   = applicants   || [];
     state.positions    = positions    || [];
@@ -129,6 +130,7 @@ async function loadAll() {
     state.stats        = stats        || {};
     renderStats(stats);
     renderSerperBadge(serper);
+    renderGeminiUsage(gemini);
     updateNavBadges(stats);
   } catch (e) {
     toast('Failed to load data: ' + e.message, 'error');
@@ -141,6 +143,24 @@ function renderStats(s = {}) {
   document.getElementById('stat-ready').textContent      = s.ready      ?? '—';
   document.getElementById('stat-submitted').textContent  = s.submitted  ?? '—';
   document.getElementById('stat-errors').textContent     = s.errors     ?? '—';
+}
+
+function renderGeminiUsage(g = {}) {
+  const total = g.total_tokens ?? 0;
+  const eur   = g.cost_eur    ?? 0;
+  const calls = g.calls       ?? 0;
+  const el    = document.getElementById('stat-gemini-n');
+  const eurEl = document.getElementById('stat-gemini-eur');
+  if (el) {
+    el.textContent = total >= 1_000_000
+      ? (total / 1_000_000).toFixed(2) + 'M'
+      : total >= 1_000 ? (total / 1_000).toFixed(1) + 'K' : String(total);
+    el.title = `${total.toLocaleString()} tokens across ${calls} API calls`;
+  }
+  if (eurEl) {
+    eurEl.textContent = `€${eur.toFixed(4)}`;
+    eurEl.style.color = eur > 4 ? '#a32d2d' : eur > 2 ? '#ef9f27' : '#7c5a08';
+  }
 }
 
 function renderSerperBadge(s = {}) {

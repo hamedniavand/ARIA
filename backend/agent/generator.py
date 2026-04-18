@@ -48,8 +48,23 @@ async def _gemini(prompt: str, retries: int = 5) -> str:
                 continue
             resp.raise_for_status()
             data = resp.json()
+            _track_usage(data)
             return data["candidates"][0]["content"]["parts"][0]["text"].strip()
     raise RuntimeError("Gemini 429 rate-limit persists after retries — try again later")
+
+
+def _track_usage(resp_data: dict) -> None:
+    try:
+        meta = resp_data.get("usageMetadata", {})
+        inp = meta.get("promptTokenCount", 0)
+        out = meta.get("candidatesTokenCount", 0)
+        if inp or out:
+            import sys as _sys, os as _os
+            _sys.path.insert(0, _os.path.join(_os.path.dirname(__file__), "../../"))
+            import gemini_usage
+            gemini_usage.increment(inp, out)
+    except Exception:
+        pass
 
 
 async def generate_cover_letter(position, applicant, docs: list) -> str:

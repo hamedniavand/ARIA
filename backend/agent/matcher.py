@@ -48,8 +48,23 @@ async def _gemini(prompt: str, retries: int = 5) -> str:
                 continue
             resp.raise_for_status()
             data = resp.json()
+            _track_usage(data)
             return data["candidates"][0]["content"]["parts"][0]["text"].strip()
     raise RuntimeError("Gemini 429 rate-limit persists after retries — try again later")
+
+
+def _track_usage(resp_data: dict) -> None:
+    try:
+        meta = resp_data.get("usageMetadata", {})
+        inp = meta.get("promptTokenCount", 0)
+        out = meta.get("candidatesTokenCount", 0)
+        if inp or out:
+            import sys as _sys, os as _os
+            _sys.path.insert(0, _os.path.join(_os.path.dirname(__file__), "../../"))
+            import gemini_usage
+            gemini_usage.increment(inp, out)
+    except Exception:
+        pass
 
 
 def _extract_json(text: str) -> dict:
@@ -146,13 +161,6 @@ async def run_matching_for_applicant(applicant_id: int) -> None:
             app_id = app.id
             new_match_count += 1
             logger.info("Matched pos=%s appl=%s score=%.0f%%", position.id, applicant_id, score)
-
-        # Generate cover letter immediately so restarts don't lose progress
-        # (startup hook _resume_pending_preparations picks up any that were interrupted)
-        try:
-            await prepare_application(app_id)
-        except Exception as exc:
-            logger.error("prepare_application %s failed: %s", app_id, exc)
 
     for i in range(0, len(gemini_positions), CONCURRENCY):
         batch = gemini_positions[i:i + CONCURRENCY]
@@ -254,14 +262,6 @@ async def run_matching_for_position(position_id: int) -> None:
                 appl.new_matches_count = (appl.new_matches_count or 0) + 1
                 session.add(appl)
                 session.commit()
-
-    # Prepare cover letters for all newly matched applications
-    for app_id in matched_app_ids:
-        try:
-            await prepare_application(app_id)
-        except Exception as exc:
-            logger.error("prepare_application %s failed: %s", app_id, exc)
-
 
 async def prepare_application(application_id: int) -> None:
     """Generate cover letter → move application to 'ready'."""

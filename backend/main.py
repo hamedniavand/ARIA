@@ -114,6 +114,27 @@ def get_stats():
         }
 
 
+@app.get("/api/gemini-usage")
+def gemini_usage_endpoint():
+    """Gemini token usage counter + EUR cost estimate."""
+    try:
+        import sys as _sys
+        _sys.path.insert(0, str(Path(__file__).parent.parent))
+        import gemini_usage
+        data = gemini_usage.read()
+        eur  = gemini_usage.cost_eur(data)
+    except Exception:
+        data = {"input_tokens": 0, "output_tokens": 0, "calls": 0}
+        eur  = 0.0
+    return {
+        "input_tokens":  data["input_tokens"],
+        "output_tokens": data["output_tokens"],
+        "total_tokens":  data["input_tokens"] + data["output_tokens"],
+        "calls":         data["calls"],
+        "cost_eur":      eur,
+    }
+
+
 @app.get("/api/serper-usage")
 def serper_usage():
     """Shared Serper.dev query counter (synced with AdContact)."""

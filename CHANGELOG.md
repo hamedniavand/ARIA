@@ -1,5 +1,22 @@
 # ARIA Changelog
 
+## Phase 11 — Manual Token Control & Gemini Usage Tracking (2026-04-18)
+
+### Token cost control — all Gemini calls now manual
+- **Match scoring** no longer fires automatically when a new applicant is created (`POST /api/applicants` no longer triggers `_match_new_applicant`).
+- **Cover letter generation** no longer fires automatically after scoring — applications land in `matched` status and stay there until admin manually clicks ⚡ Prepare.
+- **Cover letter re-generation** no longer fires when an applicant's profile (bio / field / language) is updated.
+- Document summarisation (one Gemini call per uploaded file) remains automatic — it runs once on upload and is never repeated.
+- The manual ⚡ Match button on the Applicants page still works as before.
+
+### Gemini usage tracking
+- **New `gemini_usage.py`** (`/root/ARIA/gemini_usage.py`): shared atomic counter file (`.gemini_usage.json`) recording `input_tokens`, `output_tokens`, and `calls`.
+- Both `generator.py` and `matcher.py` call `gemini_usage.increment()` after every successful Gemini API response, parsing `usageMetadata.promptTokenCount` and `candidatesTokenCount`.
+- **New `GET /api/gemini-usage`** endpoint: returns `{input_tokens, output_tokens, total_tokens, calls, cost_eur}`.
+- **Gemini Tokens stat card** in the dashboard header: displays token count (formatted as K/M), EUR cost equivalent (colour-coded: amber >€2, red >€4), and hover tooltip with exact counts and pricing info (Gemini 2.5 Flash: $0.30/M input · $2.50/M output).
+
+---
+
 ## Phase 10 — Applicant Intelligence & Matching Reliability (2026-04-18)
 
 ### Matching System — Rebuilt from scratch
